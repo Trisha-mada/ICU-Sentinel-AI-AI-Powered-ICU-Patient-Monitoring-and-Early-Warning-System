@@ -141,16 +141,10 @@ http://localhost:5000/api/health
 
 ## 5. Applying the Database Schema
 
-Review the initial SQL tables in `database/schema.sql`.
+Review the SQL tables in `database/schema.sql`.
 
-When ready to apply or verify the schema in your Neon database:
-1. Open the **Neon Console** -> **SQL Editor** tab.
-2. Open [database/schema.sql](file:///d:/FY%20Project/database/schema.sql).
-3. Paste and run the schema query to create:
-   * `patients`
-   * `icu_admissions`
-   * `vital_observations`
-   * `clinical_notes`
-   * `medication_records`
-   * `fluid_records`
-   * `lab_results`
+The database schema utilizes exactly 4 PostgreSQL tables:
+* `patients` (Patient stay, bed allocation, admission & discharge status)
+* `manual_lab_records` (Nurse-entered FiO2, pH, PaCO2, and lactate)
+* `telemetry_snapshots` (Persistent vital-sign telemetry history: HR, SpO2, SBP, MAP, DBP, RR)
+* `deterioration_alerts` (Risk predictions, early-warning flags, shock index, and acknowledgments)

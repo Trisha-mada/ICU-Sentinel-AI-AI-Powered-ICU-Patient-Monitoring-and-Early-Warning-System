@@ -78,26 +78,27 @@ export const Sidebar = ({ isOpen, onCloseMobile }) => {
         </div>
         <div className="quick-patient-list">
           {patients.map(p => {
-            const isSelected = p.id === selectedPatientId;
+            const pId = p.patient_id || p.id;
+            const isSelected = pId === selectedPatientId;
             return (
               <button
-                key={p.id}
+                key={pId}
                 className={`quick-patient-item ${isSelected ? 'selected' : ''}`}
-                onClick={() => handleSelectPatient(p.id)}
-                title={`Bed: ${p.bedNumber} | Patient: ${p.name} | Status: ${p.status}`}
+                onClick={() => handleSelectPatient(pId)}
+                title={`Bed: ${p.bedNumber} | Patient: ${p.name || pId} | Status: ${p.status}`}
               >
                 <div className="quick-patient-header">
                   <span className="quick-bed-tag">{p.bedNumber}</span>
-                  <span className={`status-pill-small ${p.status.toLowerCase()}`}>
+                  <span className={`status-pill-small ${(p.status || 'active').toLowerCase()}`}>
                     <span className={`status-dot ${getStatusDotClass(p.status)}`}></span>
                     {p.status}
                   </span>
                 </div>
-                <div className="quick-patient-name">{p.name}</div>
+                <div className="quick-patient-name">{p.name || `Patient ${pId}`}</div>
                 <div className="quick-patient-sub">
-                  <span>{p.id}</span>
+                  <span>{pId}</span>
                   <span>•</span>
-                  <span>{p.age}y {p.gender[0]}</span>
+                  <span>{p.age ? `${p.age}y ${p.gender?.[0] || ''}` : p.status}</span>
                 </div>
               </button>
             );

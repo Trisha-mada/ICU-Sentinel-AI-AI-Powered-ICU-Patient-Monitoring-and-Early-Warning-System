@@ -12,549 +12,13 @@ function checkDbReady(res) {
 }
 
 // ==========================================
-// 1. Clinical Notes
+// 1. Manual Lab Records (manual_lab_records)
 // ==========================================
 
-async function getPatientNotes(req, res, next) {
-  if (!checkDbReady(res)) return;
-  const { id } = req.params;
-
-  try {
-    const query = `
-      SELECT 
-        id,
-        patient_id AS "patientId",
-        admission_id AS "admissionId",
-        note_type AS "type",
-        author_name AS "author",
-        findings,
-        plan,
-        gcs_score AS "gcsScore",
-        pupils,
-        recorded_at AS "recordedAt",
-        created_at AS "createdAt"
-      FROM clinical_notes
-      WHERE patient_id = $1
-      ORDER BY recorded_at DESC;
-    `;
-
-    const result = await pool.query(query, [id]);
-    const formatted = result.rows.map(row => ({
-      id: row.id,
-      time: row.recordedAt ? new Date(row.recordedAt).toLocaleString() : 'N/A',
-      author: row.author,
-      type: row.type,
-      findings: row.findings,
-      plan: row.plan || '',
-      gcsScore: row.gcsScore || 'GCS 15',
-      pupils: row.pupils || 'Equal & Reactive',
-      isDemoData: false,
-      source: 'Neon PostgreSQL (Live DB)'
-    }));
-
-    res.status(200).json({
-      success: true,
-      count: formatted.length,
-      data: formatted
-    });
-  } catch (err) {
-    next(err);
-  }
-}
-
-async function createPatientNote(req, res, next) {
-  if (!checkDbReady(res)) return;
-  const { id } = req.params;
-  const {
-    admission_id,
-    admissionId,
-    note_type,
-    type,
-    author_name,
-    author,
-    findings,
-    plan,
-    gcs_score,
-    gcsScore,
-    pupils,
-    recorded_at,
-    recordedAt,
-    date,
-    time
-  } = req.body;
-
-  const noteType = (note_type || type || "Doctor's Assessment & Plan").trim();
-  const authorName = (author_name || author || 'Clinical Staff').trim();
-  const findingsText = (findings || '').trim();
-  const planText = (plan || '').trim();
-
-  if (!findingsText && !planText) {
-    return res.status(400).json({
-      error: true,
-      message: 'Clinical examination findings or care plan are required.'
-    });
-  }
-
-  let recordTime = new Date();
-  if (recorded_at || recordedAt) {
-    recordTime = new Date(recorded_at || recordedAt);
-  } else if (date && time) {
-    recordTime = new Date(`${date}T${time}`);
-  }
-
-  try {
-    const query = `
-      INSERT INTO clinical_notes (
-        patient_id,
-        admission_id,
-        note_type,
-        author_name,
-        findings,
-        plan,
-        gcs_score,
-        pupils,
-        recorded_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      RETURNING 
-        id,
-        patient_id AS "patientId",
-        admission_id AS "admissionId",
-        note_type AS "type",
-        author_name AS "author",
-        findings,
-        plan,
-        gcs_score AS "gcsScore",
-        pupils,
-        recorded_at AS "recordedAt",
-        created_at AS "createdAt";
-    `;
-
-    const result = await pool.query(query, [
-      id,
-      admission_id || admissionId || null,
-      noteType,
-      authorName,
-      findingsText || 'No specific examination findings recorded.',
-      planText || 'Continue standard ICU management.',
-      gcs_score || gcsScore || 'GCS 15',
-      pupils || 'Equal & Reactive',
-      recordTime
-    ]);
-
-    const created = result.rows[0];
-    res.status(201).json({
-      success: true,
-      message: 'Clinical note saved successfully.',
-      data: {
-        id: created.id,
-        time: created.recordedAt ? new Date(created.recordedAt).toLocaleString() : 'N/A',
-        author: created.author,
-        type: created.type,
-        findings: created.findings,
-        plan: created.plan,
-        gcsScore: created.gcsScore,
-        pupils: created.pupils,
-        isDemoData: false,
-        source: 'Neon PostgreSQL (Live DB)'
-      }
-    });
-  } catch (err) {
-    if (err.code === '23503') {
-      return res.status(404).json({ error: true, message: `Patient '${id}' not found in the database.` });
-    }
-    next(err);
-  }
-}
-
-// ==========================================
-// 2. Medication Administration Records (MAR)
-// ==========================================
-
-async function getPatientMedications(req, res, next) {
-  if (!checkDbReady(res)) return;
-  const { id } = req.params;
-
-  try {
-    const query = `
-      SELECT 
-        id,
-        patient_id AS "patientId",
-        admission_id AS "admissionId",
-        medication_name AS "medicationName",
-        prescribed_dose AS "prescribedDose",
-        administered_dose AS "administeredDose",
-        dose_unit AS "doseUnit",
-        route,
-        frequency,
-        status,
-        admin_time AS "adminTime",
-        staff_name AS "staff",
-        notes,
-        created_at AS "createdAt"
-      FROM medication_records
-      WHERE patient_id = $1
-      ORDER BY admin_time DESC;
-    `;
-
-    const result = await pool.query(query, [id]);
-    const formatted = result.rows.map(row => ({
-      id: row.id,
-      medicationName: row.medicationName,
-      prescribedDose: row.prescribedDose,
-      administeredDose: row.administeredDose,
-      doseUnit: row.doseUnit,
-      route: row.route,
-      frequency: row.frequency,
-      status: row.status,
-      time: row.adminTime ? new Date(row.adminTime).toLocaleString() : 'N/A',
-      staff: row.staff,
-      notes: row.notes || '',
-      isDemoData: false,
-      source: 'Neon PostgreSQL (Live DB)'
-    }));
-
-    res.status(200).json({
-      success: true,
-      count: formatted.length,
-      data: formatted
-    });
-  } catch (err) {
-    next(err);
-  }
-}
-
-async function createPatientMedication(req, res, next) {
-  if (!checkDbReady(res)) return;
-  const { id } = req.params;
-  const {
-    admission_id,
-    admissionId,
-    medication_name,
-    medicationName,
-    prescribed_dose,
-    prescribedDose,
-    administered_dose,
-    administeredDose,
-    dose_unit,
-    doseUnit = 'mg',
-    route = 'IV Infusion',
-    frequency = 'Stat',
-    status = 'Administered',
-    admin_time,
-    adminTime,
-    staff_name,
-    staff,
-    notes,
-    date,
-    time
-  } = req.body;
-
-  const medName = (medication_name || medicationName || '').trim();
-  const admDose = (administered_dose || administeredDose || prescribed_dose || prescribedDose || '').toString().trim();
-  const rxDose = (prescribed_dose || prescribedDose || admDose).toString().trim();
-
-  if (!medName) {
-    return res.status(400).json({ error: true, message: 'Medication name is required.' });
-  }
-  if (!admDose) {
-    return res.status(400).json({ error: true, message: 'Administered dose is required.' });
-  }
-
-  let recordTime = new Date();
-  if (admin_time || adminTime) {
-    recordTime = new Date(admin_time || adminTime);
-  } else if (date && time) {
-    recordTime = new Date(`${date}T${time}`);
-  }
-
-  const staffName = (staff_name || staff || 'Clinical Staff').trim();
-
-  try {
-    const query = `
-      INSERT INTO medication_records (
-        patient_id,
-        admission_id,
-        medication_name,
-        prescribed_dose,
-        administered_dose,
-        dose_unit,
-        route,
-        frequency,
-        status,
-        admin_time,
-        staff_name,
-        notes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-      RETURNING 
-        id,
-        patient_id AS "patientId",
-        medication_name AS "medicationName",
-        prescribed_dose AS "prescribedDose",
-        administered_dose AS "administeredDose",
-        dose_unit AS "doseUnit",
-        route,
-        frequency,
-        status,
-        admin_time AS "adminTime",
-        staff_name AS "staff",
-        notes,
-        created_at AS "createdAt";
-    `;
-
-    const result = await pool.query(query, [
-      id,
-      admission_id || admissionId || null,
-      medName,
-      rxDose,
-      admDose,
-      dose_unit || doseUnit,
-      route,
-      frequency,
-      status,
-      recordTime,
-      staffName,
-      notes || null
-    ]);
-
-    const created = result.rows[0];
-    res.status(201).json({
-      success: true,
-      message: 'Medication administration record saved successfully.',
-      data: {
-        id: created.id,
-        medicationName: created.medicationName,
-        prescribedDose: created.prescribedDose,
-        administeredDose: created.administeredDose,
-        doseUnit: created.doseUnit,
-        route: created.route,
-        frequency: created.frequency,
-        status: created.status,
-        time: created.adminTime ? new Date(created.adminTime).toLocaleString() : 'N/A',
-        staff: created.staff,
-        notes: created.notes,
-        isDemoData: false,
-        source: 'Neon PostgreSQL (Live DB)'
-      }
-    });
-  } catch (err) {
-    if (err.code === '23503') {
-      return res.status(404).json({ error: true, message: `Patient '${id}' not found in the database.` });
-    }
-    next(err);
-  }
-}
-
-// ==========================================
-// 3. Fluid Intake & Output (I/O) Records
-// ==========================================
-
-async function getPatientFluids(req, res, next) {
-  if (!checkDbReady(res)) return;
-  const { id } = req.params;
-
-  try {
-    const query = `
-      SELECT 
-        id,
-        patient_id AS "patientId",
-        admission_id AS "admissionId",
-        interval_label AS "interval",
-        oral_intake_ml AS "oralIntake",
-        iv_intake_ml AS "ivIntake",
-        other_intake_ml AS "otherIntake",
-        total_intake_ml AS "totalIntake",
-        urine_output_ml AS "urineOutput",
-        other_output_ml AS "otherOutput",
-        total_output_ml AS "totalOutput",
-        net_balance_ml AS "netBalance",
-        urine_appearance AS "urineAppearance",
-        catheter_status AS "catheterStatus",
-        recorded_at AS "recordedAt",
-        staff_name AS "staff",
-        notes,
-        created_at AS "createdAt"
-      FROM fluid_records
-      WHERE patient_id = $1
-      ORDER BY recorded_at DESC;
-    `;
-
-    const result = await pool.query(query, [id]);
-    const formatted = result.rows.map(row => ({
-      id: row.id,
-      interval: row.interval,
-      oralIntake: Number(row.oralIntake || 0),
-      ivIntake: Number(row.ivIntake || 0),
-      otherIntake: Number(row.otherIntake || 0),
-      totalIntake: Number(row.totalIntake || 0),
-      urineOutput: Number(row.urineOutput || 0),
-      otherOutput: Number(row.otherOutput || 0),
-      totalOutput: Number(row.totalOutput || 0),
-      netBalance: Number(row.netBalance || 0),
-      urineAppearance: row.urineAppearance || 'Clear Amber',
-      catheterStatus: row.catheterStatus || 'Foley Catheter',
-      time: row.recordedAt ? new Date(row.recordedAt).toLocaleString() : 'N/A',
-      staff: row.staff || 'Clinical Staff',
-      notes: row.notes || '',
-      isDemoData: false,
-      source: 'Neon PostgreSQL (Live DB)'
-    }));
-
-    res.status(200).json({
-      success: true,
-      count: formatted.length,
-      data: formatted
-    });
-  } catch (err) {
-    next(err);
-  }
-}
-
-async function createPatientFluid(req, res, next) {
-  if (!checkDbReady(res)) return;
-  const { id } = req.params;
-  const {
-    admission_id,
-    admissionId,
-    interval_label,
-    interval = 'Current Shift Interval',
-    oral_intake_ml,
-    oralIntake,
-    iv_intake_ml,
-    ivIntake,
-    other_intake_ml,
-    otherIntake,
-    urine_output_ml,
-    urineOutput,
-    other_output_ml,
-    otherOutput,
-    urine_appearance,
-    urineAppearance = 'Clear Amber',
-    catheter_status,
-    catheterStatus = 'Foley Catheter',
-    recorded_at,
-    recordedAt,
-    staff_name,
-    staff,
-    notes,
-    date,
-    time
-  } = req.body;
-
-  const parseNum = (val) => (val !== undefined && val !== null && val !== '' && !isNaN(Number(val))) ? Number(val) : 0;
-
-  const oral = parseNum(oral_intake_ml !== undefined ? oral_intake_ml : oralIntake);
-  const iv = parseNum(iv_intake_ml !== undefined ? iv_intake_ml : ivIntake);
-  const otherIn = parseNum(other_intake_ml !== undefined ? other_intake_ml : otherIntake);
-  const urine = parseNum(urine_output_ml !== undefined ? urine_output_ml : urineOutput);
-  const otherOut = parseNum(other_output_ml !== undefined ? other_output_ml : otherOutput);
-
-  if (oral === 0 && iv === 0 && otherIn === 0 && urine === 0 && otherOut === 0) {
-    return res.status(400).json({
-      error: true,
-      message: 'Please provide at least one non-zero fluid intake or output amount.'
-    });
-  }
-
-  let recordTime = new Date();
-  if (recorded_at || recordedAt) {
-    recordTime = new Date(recorded_at || recordedAt);
-  } else if (date && time) {
-    recordTime = new Date(`${date}T${time}`);
-  }
-
-  const staffName = (staff_name || staff || 'Clinical Staff').trim();
-  const intervalName = (interval_label || interval || 'Current Shift Interval').trim();
-
-  try {
-    // Note: total_intake_ml, total_output_ml, and net_balance_ml are GENERATED ALWAYS columns in PostgreSQL
-    const query = `
-      INSERT INTO fluid_records (
-        patient_id,
-        admission_id,
-        interval_label,
-        oral_intake_ml,
-        iv_intake_ml,
-        other_intake_ml,
-        urine_output_ml,
-        other_output_ml,
-        urine_appearance,
-        catheter_status,
-        recorded_at,
-        staff_name,
-        notes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-      RETURNING 
-        id,
-        patient_id AS "patientId",
-        interval_label AS "interval",
-        oral_intake_ml AS "oralIntake",
-        iv_intake_ml AS "ivIntake",
-        other_intake_ml AS "otherIntake",
-        total_intake_ml AS "totalIntake",
-        urine_output_ml AS "urineOutput",
-        other_output_ml AS "otherOutput",
-        total_output_ml AS "totalOutput",
-        net_balance_ml AS "netBalance",
-        urine_appearance AS "urineAppearance",
-        catheter_status AS "catheterStatus",
-        recorded_at AS "recordedAt",
-        staff_name AS "staff",
-        notes,
-        created_at AS "createdAt";
-    `;
-
-    const result = await pool.query(query, [
-      id,
-      admission_id || admissionId || null,
-      intervalName,
-      oral,
-      iv,
-      otherIn,
-      urine,
-      otherOut,
-      urine_appearance || urineAppearance,
-      catheter_status || catheterStatus,
-      recordTime,
-      staffName,
-      notes || null
-    ]);
-
-    const created = result.rows[0];
-    res.status(201).json({
-      success: true,
-      message: 'Fluid record saved successfully.',
-      data: {
-        id: created.id,
-        interval: created.interval,
-        oralIntake: Number(created.oralIntake || 0),
-        ivIntake: Number(created.ivIntake || 0),
-        otherIntake: Number(created.otherIntake || 0),
-        totalIntake: Number(created.totalIntake || 0),
-        urineOutput: Number(created.urineOutput || 0),
-        otherOutput: Number(created.otherOutput || 0),
-        totalOutput: Number(created.totalOutput || 0),
-        netBalance: Number(created.netBalance || 0),
-        urineAppearance: created.urineAppearance,
-        catheterStatus: created.catheterStatus,
-        time: created.recordedAt ? new Date(created.recordedAt).toLocaleString() : 'N/A',
-        staff: created.staff,
-        notes: created.notes,
-        isDemoData: false,
-        source: 'Neon PostgreSQL (Live DB)'
-      }
-    });
-  } catch (err) {
-    if (err.code === '23503') {
-      return res.status(404).json({ error: true, message: `Patient '${id}' not found in the database.` });
-    }
-    next(err);
-  }
-}
-
-// ==========================================
-// 4. Laboratory & ABG Results
-// ==========================================
-
+/**
+ * GET /api/patients/:id/labs
+ * Retrieve nurse-entered lab records from 'manual_lab_records'
+ */
 async function getPatientLabs(req, res, next) {
   if (!checkDbReady(res)) return;
   const { id } = req.params;
@@ -564,33 +28,57 @@ async function getPatientLabs(req, res, next) {
       SELECT 
         id,
         patient_id AS "patientId",
-        admission_id AS "admissionId",
-        panel_name AS "panel",
-        test_values AS "values",
-        collection_time AS "collectionTime",
-        result_time AS "resultTime",
-        status,
-        staff_name AS "staff",
-        notes,
-        created_at AS "createdAt"
-      FROM lab_results
+        recorded_at AS "recordedAt",
+        fio2,
+        ph,
+        paco2,
+        lactate,
+        recorded_by AS "recordedBy",
+        notes
+      FROM manual_lab_records
       WHERE patient_id = $1
-      ORDER BY collection_time DESC;
+      ORDER BY recorded_at DESC;
     `;
 
     const result = await pool.query(query, [id]);
-    const formatted = result.rows.map(row => ({
-      id: row.id,
-      panel: row.panel,
-      values: row.values || {},
-      collectionTime: row.collectionTime ? new Date(row.collectionTime).toLocaleString() : 'N/A',
-      resultTime: row.resultTime ? new Date(row.resultTime).toLocaleString() : 'N/A',
-      status: row.status || 'Entered',
-      staff: row.staff || 'Clinical Staff',
-      notes: row.notes || '',
-      isDemoData: false,
-      source: 'Neon PostgreSQL (Live DB)'
-    }));
+    const formatted = result.rows.map(row => {
+      const phVal = row.ph !== null ? Number(row.ph) : null;
+      const paco2Val = row.paco2 !== null ? Number(row.paco2) : null;
+      const lactateVal = row.lactate !== null ? Number(row.lactate) : null;
+      const fio2Val = row.fio2 !== null ? Number(row.fio2) : 0.21;
+
+      const values = {
+        fio2: { val: fio2Val, unit: '', ref: '0.21 - 1.00', flag: fio2Val > 0.40 ? 'high' : 'normal' }
+      };
+
+      if (phVal !== null) {
+        values.ph = { val: phVal, unit: '', ref: '7.35 - 7.45', flag: phVal < 7.35 ? 'low' : phVal > 7.45 ? 'high' : 'normal' };
+      }
+      if (paco2Val !== null) {
+        values.paco2 = { val: paco2Val, unit: 'mmHg', ref: '35 - 45', flag: paco2Val > 45 ? 'high' : paco2Val < 35 ? 'low' : 'normal' };
+      }
+      if (lactateVal !== null) {
+        values.lactate = { val: lactateVal, unit: 'mmol/L', ref: '< 2.0', flag: lactateVal >= 2.0 ? 'high' : 'normal' };
+      }
+
+      return {
+        id: row.id,
+        patientId: row.patientId,
+        panel: 'Nurse-Entered ABG & Labs',
+        fio2: fio2Val,
+        ph: phVal,
+        paco2: paco2Val,
+        lactate: lactateVal,
+        values,
+        collectionTime: row.recordedAt ? new Date(row.recordedAt).toLocaleString() : 'N/A',
+        resultTime: row.recordedAt ? new Date(row.recordedAt).toLocaleString() : 'N/A',
+        status: 'Entered',
+        staff: row.recordedBy || 'NURSE_STATION',
+        notes: row.notes || '',
+        isDemoData: false,
+        source: 'Neon PostgreSQL (manual_lab_records)'
+      };
+    });
 
     res.status(200).json({
       success: true,
@@ -602,122 +90,492 @@ async function getPatientLabs(req, res, next) {
   }
 }
 
+/**
+ * POST /api/patients/:id/labs
+ * Record a manual lab record into 'manual_lab_records'
+ */
 async function createPatientLab(req, res, next) {
   if (!checkDbReady(res)) return;
   const { id } = req.params;
   const {
-    admission_id,
-    admissionId,
-    panel_name,
-    panel = 'Manual Laboratory Entry',
-    test_values,
-    values = {},
-    collection_time,
-    collectionTime,
-    result_time,
-    resultTime,
-    status = 'Entered',
+    fio2,
+    ph,
+    paco2,
+    lactate,
+    values,
+    recorded_by,
+    recordedBy,
     staff_name,
     staff,
     notes,
+    recorded_at,
+    recordedAt,
     date,
     time
   } = req.body;
 
-  const panelName = (panel_name || panel || 'Manual Laboratory Entry').trim();
-  const testVals = (test_values && typeof test_values === 'object') ? test_values : (values && typeof values === 'object' ? values : {});
+  const parseNum = (val) => (val !== undefined && val !== null && val !== '' && !isNaN(Number(val))) ? Number(val) : null;
 
-  if (Object.keys(testVals).length === 0) {
+  let fio2Val = parseNum(fio2);
+  let phVal = parseNum(ph);
+  let paco2Val = parseNum(paco2);
+  let lactateVal = parseNum(lactate);
+
+  // Fallback extraction from values object if provided
+  if (values && typeof values === 'object') {
+    if (fio2Val === null && values.fio2) fio2Val = parseNum(values.fio2.val !== undefined ? values.fio2.val : values.fio2);
+    if (phVal === null && values.ph) phVal = parseNum(values.ph.val !== undefined ? values.ph.val : values.ph);
+    if (paco2Val === null && values.paco2) paco2Val = parseNum(values.paco2.val !== undefined ? values.paco2.val : values.paco2);
+    if (lactateVal === null && values.lactate) lactateVal = parseNum(values.lactate.val !== undefined ? values.lactate.val : values.lactate);
+  }
+
+  if (fio2Val === null) fio2Val = 0.21; // Standard room air baseline
+
+  if (phVal === null && paco2Val === null && lactateVal === null && fio2Val === 0.21 && !notes) {
     return res.status(400).json({
       error: true,
-      message: 'At least one laboratory test result parameter must be provided.'
+      message: 'At least one lab parameter (fio2, ph, paco2, lactate) or notes must be provided.'
     });
   }
 
-  let colTime = new Date();
-  if (collection_time || collectionTime) {
-    colTime = new Date(collection_time || collectionTime);
+  let recordTime = new Date();
+  if (recorded_at || recordedAt) {
+    recordTime = new Date(recorded_at || recordedAt);
   } else if (date && time) {
-    colTime = new Date(`${date}T${time}`);
+    recordTime = new Date(`${date}T${time}`);
   }
 
-  let resTime = new Date();
-  if (result_time || resultTime) {
-    resTime = new Date(result_time || resultTime);
-  }
+  const staffName = (recorded_by || recordedBy || staff_name || staff || 'NURSE_STATION').trim();
 
-  const staffName = (staff_name || staff || 'Clinical Staff').trim();
-
+  const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+
+    // 1. Check patient exists in 'patients'
+    const patientCheck = await client.query('SELECT patient_id FROM patients WHERE patient_id = $1;', [id]);
+    if (patientCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: true, message: `Patient '${id}' not found in the database.` });
+    }
+
+    // 2. Insert into 'manual_lab_records'
     const query = `
-      INSERT INTO lab_results (
+      INSERT INTO manual_lab_records (
         patient_id,
-        admission_id,
-        panel_name,
-        test_values,
-        collection_time,
-        result_time,
-        status,
-        staff_name,
+        recorded_at,
+        fio2,
+        ph,
+        paco2,
+        lactate,
+        recorded_by,
         notes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING 
         id,
         patient_id AS "patientId",
-        panel_name AS "panel",
-        test_values AS "values",
-        collection_time AS "collectionTime",
-        result_time AS "resultTime",
-        status,
-        staff_name AS "staff",
-        notes,
-        created_at AS "createdAt";
+        recorded_at AS "recordedAt",
+        fio2,
+        ph,
+        paco2,
+        lactate,
+        recorded_by AS "recordedBy",
+        notes;
     `;
 
-    const result = await pool.query(query, [
+    const result = await client.query(query, [
       id,
-      admission_id || admissionId || null,
-      panelName,
-      JSON.stringify(testVals),
-      colTime,
-      resTime,
-      status,
+      recordTime.toISOString(),
+      fio2Val,
+      phVal,
+      paco2Val,
+      lactateVal,
       staffName,
       notes || null
     ]);
 
     const created = result.rows[0];
+
+    // 3. Evaluate Lab Deterioration Risk (e.g. Sepsis / Severe Acidosis)
+    let triggeredAlert = null;
+    if ((lactateVal !== null && lactateVal >= 2.0) || (phVal !== null && phVal < 7.30) || (fio2Val > 0.60)) {
+      let riskScore = 0.50;
+      if (lactateVal >= 4.0) riskScore += 0.35;
+      else if (lactateVal >= 2.0) riskScore += 0.20;
+
+      if (phVal < 7.20) riskScore += 0.25;
+      else if (phVal < 7.30) riskScore += 0.15;
+
+      if (fio2Val > 0.60) riskScore += 0.15;
+
+      const riskProb = Math.min(0.99, parseFloat(riskScore.toFixed(2)));
+      const isEarly = riskProb >= 0.60 || lactateVal >= 2.0;
+
+      const alertRes = await client.query(`
+        INSERT INTO deterioration_alerts (
+          patient_id,
+          triggered_at,
+          risk_probability,
+          is_early_warning,
+          shock_index,
+          delta_1h_map,
+          acknowledged
+        ) VALUES ($1, $2, $3, $4, NULL, NULL, false)
+        RETURNING id, patient_id AS "patientId", triggered_at AS "triggeredAt", risk_probability AS "riskProbability", is_early_warning AS "isEarlyWarning";
+      `, [id, recordTime.toISOString(), riskProb, isEarly]);
+
+      triggeredAlert = alertRes.rows[0];
+    }
+
+    await client.query('COMMIT');
+
+    const formattedValues = {
+      fio2: { val: created.fio2, unit: '', ref: '0.21 - 1.00', flag: created.fio2 > 0.40 ? 'high' : 'normal' }
+    };
+    if (created.ph !== null) formattedValues.ph = { val: Number(created.ph), unit: '', ref: '7.35 - 7.45', flag: Number(created.ph) < 7.35 ? 'low' : Number(created.ph) > 7.45 ? 'high' : 'normal' };
+    if (created.paco2 !== null) formattedValues.paco2 = { val: Number(created.paco2), unit: 'mmHg', ref: '35 - 45', flag: Number(created.paco2) > 45 ? 'high' : Number(created.paco2) < 35 ? 'low' : 'normal' };
+    if (created.lactate !== null) formattedValues.lactate = { val: Number(created.lactate), unit: 'mmol/L', ref: '< 2.0', flag: Number(created.lactate) >= 2.0 ? 'high' : 'normal' };
+
     res.status(201).json({
       success: true,
-      message: 'Laboratory results saved successfully.',
+      message: 'Manual lab record saved successfully.',
       data: {
         id: created.id,
-        panel: created.panel,
-        values: created.values,
-        collectionTime: created.collectionTime ? new Date(created.collectionTime).toLocaleString() : 'N/A',
-        resultTime: created.resultTime ? new Date(created.resultTime).toLocaleString() : 'N/A',
-        status: created.status,
-        staff: created.staff,
+        patientId: created.patientId,
+        panel: 'Nurse-Entered ABG & Labs',
+        fio2: Number(created.fio2),
+        ph: created.ph !== null ? Number(created.ph) : null,
+        paco2: created.paco2 !== null ? Number(created.paco2) : null,
+        lactate: created.lactate !== null ? Number(created.lactate) : null,
+        values: formattedValues,
+        collectionTime: created.recordedAt ? new Date(created.recordedAt).toLocaleString() : 'N/A',
+        resultTime: created.recordedAt ? new Date(created.recordedAt).toLocaleString() : 'N/A',
+        status: 'Entered',
+        staff: created.recordedBy,
         notes: created.notes,
+        deteriorationAlert: triggeredAlert,
         isDemoData: false,
-        source: 'Neon PostgreSQL (Live DB)'
+        source: 'Neon PostgreSQL (manual_lab_records)'
       }
     });
   } catch (err) {
-    if (err.code === '23503') {
-      return res.status(404).json({ error: true, message: `Patient '${id}' not found in the database.` });
-    }
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
+// ==========================================
+// 2. Deterioration Alerts (deterioration_alerts)
+// ==========================================
+
+/**
+ * GET /api/patients/:id/alerts
+ * Retrieve deterioration alerts for a patient
+ */
+async function getPatientAlerts(req, res, next) {
+  if (!checkDbReady(res)) return;
+  const { id } = req.params;
+
+  try {
+    const query = `
+      SELECT 
+        id,
+        patient_id AS "patientId",
+        triggered_at AS "triggeredAt",
+        risk_probability AS "riskProbability",
+        is_early_warning AS "isEarlyWarning",
+        shock_index AS "shockIndex",
+        delta_1h_map AS "delta1hMap",
+        acknowledged,
+        acknowledged_by AS "acknowledgedBy",
+        acknowledged_at AS "acknowledgedAt"
+      FROM deterioration_alerts
+      WHERE patient_id = $1
+      ORDER BY triggered_at DESC;
+    `;
+
+    const result = await pool.query(query, [id]);
+    const formatted = result.rows.map(row => {
+      const risk = Number(row.riskProbability);
+      let severity = 'low';
+      if (risk >= 0.75 || (row.shockIndex && Number(row.shockIndex) >= 1.0)) {
+        severity = 'high';
+      } else if (risk >= 0.50 || (row.shockIndex && Number(row.shockIndex) >= 0.85)) {
+        severity = 'medium';
+      }
+
+      let description = `Deterioration risk: ${(risk * 100).toFixed(0)}%`;
+      if (row.shockIndex) description += ` • Shock Index: ${Number(row.shockIndex).toFixed(2)}`;
+      if (row.delta1hMap) description += ` • 1h MAP Δ: ${Number(row.delta1hMap) > 0 ? '+' : ''}${row.delta1hMap} mmHg`;
+
+      return {
+        id: row.id,
+        patientId: row.patientId,
+        severity,
+        parameter: row.isEarlyWarning ? 'Early Deterioration Warning' : 'Risk Prediction Alert',
+        description,
+        riskProbability: risk,
+        isEarlyWarning: !!row.isEarlyWarning,
+        shockIndex: row.shockIndex !== null ? Number(row.shockIndex) : null,
+        delta1hMap: row.delta1hMap !== null ? Number(row.delta1hMap) : null,
+        timestamp: row.triggeredAt ? new Date(row.triggeredAt).toLocaleString() : 'N/A',
+        status: row.acknowledged ? 'Acknowledged' : 'Active',
+        isAcknowledged: !!row.acknowledged,
+        acknowledgedBy: row.acknowledgedBy,
+        acknowledgedAt: row.acknowledgedAt
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      count: formatted.length,
+      data: formatted
+    });
+  } catch (err) {
     next(err);
   }
 }
 
+/**
+ * GET /api/alerts
+ * Retrieve all recent alerts across all ICU patients
+ */
+async function getAllAlerts(req, res, next) {
+  if (!checkDbReady(res)) return;
+
+  try {
+    const query = `
+      SELECT 
+        a.id,
+        a.patient_id AS "patientId",
+        p.bed_id AS "bedNumber",
+        a.triggered_at AS "triggeredAt",
+        a.risk_probability AS "riskProbability",
+        a.is_early_warning AS "isEarlyWarning",
+        a.shock_index AS "shockIndex",
+        a.delta_1h_map AS "delta1hMap",
+        a.acknowledged,
+        a.acknowledged_by AS "acknowledgedBy",
+        a.acknowledged_at AS "acknowledgedAt"
+      FROM deterioration_alerts a
+      LEFT JOIN patients p ON p.patient_id = a.patient_id
+      ORDER BY a.triggered_at DESC
+      LIMIT 100;
+    `;
+
+    const result = await pool.query(query);
+    const formatted = result.rows.map(row => {
+      const risk = Number(row.riskProbability);
+      let severity = 'low';
+      if (risk >= 0.75 || (row.shockIndex && Number(row.shockIndex) >= 1.0)) {
+        severity = 'high';
+      } else if (risk >= 0.50 || (row.shockIndex && Number(row.shockIndex) >= 0.85)) {
+        severity = 'medium';
+      }
+
+      let description = `Deterioration risk: ${(risk * 100).toFixed(0)}%`;
+      if (row.shockIndex) description += ` • Shock Index: ${Number(row.shockIndex).toFixed(2)}`;
+      if (row.delta1hMap) description += ` • 1h MAP Δ: ${Number(row.delta1hMap) > 0 ? '+' : ''}${row.delta1hMap} mmHg`;
+
+      return {
+        id: row.id,
+        patientId: row.patientId,
+        patientName: `Patient ${row.patientId}`,
+        bedNumber: row.bedNumber || 'ICU Bed',
+        severity,
+        parameter: row.isEarlyWarning ? 'Early Deterioration Warning' : 'Risk Prediction Alert',
+        description,
+        riskProbability: risk,
+        isEarlyWarning: !!row.isEarlyWarning,
+        shockIndex: row.shockIndex !== null ? Number(row.shockIndex) : null,
+        delta1hMap: row.delta1hMap !== null ? Number(row.delta1hMap) : null,
+        timestamp: row.triggeredAt ? new Date(row.triggeredAt).toLocaleString() : 'N/A',
+        status: row.acknowledged ? 'Acknowledged' : 'Active',
+        isAcknowledged: !!row.acknowledged,
+        acknowledgedBy: row.acknowledgedBy,
+        acknowledgedAt: row.acknowledgedAt
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      count: formatted.length,
+      data: formatted
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/alerts/:id/acknowledge
+ * Acknowledge a deterioration alert in Neon DB
+ */
+async function acknowledgeAlert(req, res, next) {
+  if (!checkDbReady(res)) return;
+  const { id } = req.params;
+  const { acknowledged_by, acknowledgedBy } = req.body;
+  const staff = (acknowledged_by || acknowledgedBy || 'Clinical Staff').trim();
+
+  try {
+    const query = `
+      UPDATE deterioration_alerts
+      SET 
+        acknowledged = true,
+        acknowledged_by = $2,
+        acknowledged_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING 
+        id,
+        patient_id AS "patientId",
+        risk_probability AS "riskProbability",
+        is_early_warning AS "isEarlyWarning",
+        acknowledged,
+        acknowledged_by AS "acknowledgedBy",
+        acknowledged_at AS "acknowledgedAt";
+    `;
+
+    const result = await pool.query(query, [id, staff]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: true, message: `Alert with ID '${id}' not found.` });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Alert acknowledged successfully.',
+      data: result.rows[0]
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ==========================================
+// 3. Removed Tables Graceful Handling
+// (clinical_notes, medication_records, fluid_records)
+// ==========================================
+
+async function getPatientNotes(req, res) {
+  res.status(200).json({
+    success: true,
+    count: 0,
+    data: [],
+    message: 'clinical_notes table is removed from NeonDB schema; managed in session memory.'
+  });
+}
+
+async function createPatientNote(req, res) {
+  const { id } = req.params;
+  const { author, type, findings, plan, gcsScore, pupils } = req.body;
+  res.status(200).json({
+    success: true,
+    message: 'Clinical note accepted (session memory).',
+    data: {
+      id: `NOTE-${id}-${Date.now().toString().slice(-4)}`,
+      patientId: id,
+      author: author || 'Clinical Staff',
+      type: type || 'Clinical Note',
+      findings: findings || '',
+      plan: plan || '',
+      gcsScore: gcsScore || 'GCS 15',
+      pupils: pupils || 'Equal & Reactive',
+      time: new Date().toLocaleString(),
+      isDemoData: false,
+      source: 'Session Memory'
+    }
+  });
+}
+
+async function getPatientMedications(req, res) {
+  res.status(200).json({
+    success: true,
+    count: 0,
+    data: [],
+    message: 'medication_records table is removed from NeonDB schema; managed in session memory.'
+  });
+}
+
+async function createPatientMedication(req, res) {
+  const { id } = req.params;
+  const { medicationName, prescribedDose, administeredDose, doseUnit, route, frequency, status, staff } = req.body;
+  res.status(200).json({
+    success: true,
+    message: 'Medication administration record accepted (session memory).',
+    data: {
+      id: `MED-${id}-${Date.now().toString().slice(-4)}`,
+      patientId: id,
+      medicationName: medicationName || 'Medication',
+      prescribedDose: prescribedDose || administeredDose,
+      administeredDose: administeredDose || prescribedDose,
+      doseUnit: doseUnit || 'mg',
+      route: route || 'IV Infusion',
+      frequency: frequency || 'Stat',
+      status: status || 'Administered',
+      staff: staff || 'Clinical Staff',
+      time: new Date().toLocaleString(),
+      isDemoData: false,
+      source: 'Session Memory'
+    }
+  });
+}
+
+async function getPatientFluids(req, res) {
+  res.status(200).json({
+    success: true,
+    count: 0,
+    data: [],
+    message: 'fluid_records table is removed from NeonDB schema; managed in session memory.'
+  });
+}
+
+async function createPatientFluid(req, res) {
+  const { id } = req.params;
+  const { interval, oralIntake, ivIntake, otherIntake, urineOutput, otherOutput, urineAppearance, catheterStatus, staff } = req.body;
+  const oral = Number(oralIntake) || 0;
+  const iv = Number(ivIntake) || 0;
+  const otherIn = Number(otherIntake) || 0;
+  const urine = Number(urineOutput) || 0;
+  const otherOut = Number(otherOutput) || 0;
+  const totalIn = oral + iv + otherIn;
+  const totalOut = urine + otherOut;
+  const net = totalIn - totalOut;
+
+  res.status(200).json({
+    success: true,
+    message: 'Fluid record accepted (session memory).',
+    data: {
+      id: `FL-${id}-${Date.now().toString().slice(-4)}`,
+      patientId: id,
+      interval: interval || 'Current Interval',
+      oralIntake: oral,
+      ivIntake: iv,
+      otherIntake: otherIn,
+      totalIntake: totalIn,
+      urineOutput: urine,
+      otherOutput: otherOut,
+      totalOutput: totalOut,
+      netBalance: net,
+      urineAppearance: urineAppearance || 'Clear Amber',
+      catheterStatus: catheterStatus || 'Foley Catheter',
+      time: new Date().toLocaleString(),
+      staff: staff || 'Clinical Staff',
+      isDemoData: false,
+      source: 'Session Memory'
+    }
+  });
+}
+
 module.exports = {
+  getPatientLabs,
+  createPatientLab,
+  getPatientAlerts,
+  getAllAlerts,
+  acknowledgeAlert,
   getPatientNotes,
   createPatientNote,
   getPatientMedications,
   createPatientMedication,
   getPatientFluids,
-  createPatientFluid,
-  getPatientLabs,
-  createPatientLab
+  createPatientFluid
 };

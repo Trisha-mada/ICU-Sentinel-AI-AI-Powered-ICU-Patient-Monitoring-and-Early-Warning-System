@@ -7,17 +7,37 @@ const { errorHandler } = require('./middleware/errorHandler');
 
 const patientRoutes = require('./routes/patientRoutes');
 const vitalsRoutes = require('./routes/vitalsRoutes');
+const { getBedStatuses, dischargePatient } = require('./controllers/patientController');
+const { getAllAlerts, acknowledgeAlert } = require('./controllers/clinicalDataController');
 
 const app = express();
 
 // Request body JSON parsing middleware
 app.use(express.json());
 
-// Configure CORS with configurable frontend origin
-const allowedOrigin = process.env.FRONTEND_URL || 'http://localhost:5173';
+// Configure CORS to support all local development ports and configured FRONTEND_URL
+const allowedOriginEnv = process.env.FRONTEND_URL;
 app.use(cors({
-  origin: allowedOrigin,
-  credentials: true
+  origin: function (origin, callback) {
+    // Allow non-browser requests (no origin header, e.g. curl, tests, server-to-server)
+    if (!origin) return callback(null, true);
+    
+    // Allow explicit FRONTEND_URL if specified
+    if (allowedOriginEnv && origin === allowedOriginEnv) {
+      return callback(null, true);
+    }
+
+    // Allow all localhost and 127.0.0.1 ports for development
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      return callback(null, true);
+    }
+
+    // Permissive fallback for development environments
+    return callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
 // Health-check endpoint
@@ -31,9 +51,12 @@ app.get('/api/health', (req, res) => {
 });
 
 // Direct convenience aliases
-const { getBedStatuses, dischargePatient } = require('./controllers/patientController');
 app.get('/api/beds/status', getBedStatuses);
 app.post('/api/admissions/:id/discharge', dischargePatient);
+
+// Alerts endpoints
+app.get('/api/alerts', getAllAlerts);
+app.post('/api/alerts/:id/acknowledge', acknowledgeAlert);
 
 // API Routes
 app.use('/api/patients', patientRoutes);

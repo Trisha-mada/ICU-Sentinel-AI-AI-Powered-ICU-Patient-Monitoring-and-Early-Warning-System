@@ -109,7 +109,8 @@ export const DischargePatientModal = ({ isOpen, onClose, patient }) => {
         discharge_notes: formData.dischargeNotes.trim()
       };
 
-      const result = await dischargePatient(patient.id, payload);
+      const patientIdentifier = patient.patient_id || patient.id;
+      const result = await dischargePatient(patientIdentifier, payload);
       if (result.success) {
         onClose();
       } else {

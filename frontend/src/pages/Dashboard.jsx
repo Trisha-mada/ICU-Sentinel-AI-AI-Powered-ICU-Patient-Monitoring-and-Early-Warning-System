@@ -341,24 +341,25 @@ export const Dashboard = () => {
 
                   // 1. Render OCCUPIED Bed Card
                   if (isOccupied) {
-                    const isSelected = patient.id === selectedPatientId;
+                    const pId = patient.patient_id || patient.id;
+                    const isSelected = pId === selectedPatientId;
                     const vit = patient.vitals || {};
 
                     return (
                       <div
                         key={bedNumber}
-                        className={`central-bed-panel status-${patient.status.toLowerCase()} ${isSelected ? 'selected-bed-panel' : ''}`}
-                        onClick={() => setSelectedPatientId(patient.id)}
+                        className={`central-bed-panel status-${(patient.status || 'active').toLowerCase()} ${isSelected ? 'selected-bed-panel' : ''}`}
+                        onClick={() => setSelectedPatientId(pId)}
                         role="button"
                         tabIndex={0}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedPatientId(patient.id); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedPatientId(pId); }}
                         aria-label={`Select Bed ${patient.bedNumber} - ${patient.name}`}
                       >
                         {/* Bed Panel Header */}
                         <div className="bed-panel-header flex-between">
                           <div className="bed-meta-left">
                             <span className="bed-badge-title">{patient.bedNumber}</span>
-                            <span className="bed-patient-id font-mono">{patient.id}</span>
+                            <span className="bed-patient-id font-mono">{pId}</span>
                             {patient.ventilatorAttached && (
                               <span className="vent-indicator-mini" title="Mechanical Ventilator Connected">VENT</span>
                             )}
@@ -370,10 +371,10 @@ export const Dashboard = () => {
 
                         {/* Patient Name & Demographics */}
                         <div className="bed-patient-info flex-between">
-                          <span className="bed-patient-name">{patient.name}</span>
-                          <span className="bed-patient-demog">{patient.age}y {patient.gender[0]}</span>
+                          <span className="bed-patient-name">{patient.name || `Patient ${pId}`}</span>
+                          <span className="bed-patient-demog">{patient.age ? `${patient.age}y ${patient.gender?.[0] || ''}` : patient.status}</span>
                         </div>
-                        <p className="bed-patient-diag" title={patient.diagnosis}>{patient.diagnosis}</p>
+                        <p className="bed-patient-diag" title={patient.diagnosis || 'ICU Admission'}>{patient.diagnosis || 'ICU Stay'}</p>
 
                         {/* Telemetry Block */}
                         <div className="bed-telemetry-grid">
@@ -515,8 +516,8 @@ export const Dashboard = () => {
                   </div>
                   <div className="banner-text">
                     <div className="banner-name-row">
-                      <h3 className="patient-full-name">{selectedPatient.name}</h3>
-                      <span className="patient-id-label font-mono">ID: {selectedPatient.id}</span>
+                      <h3 className="patient-full-name">{selectedPatient.name || `Patient ${selectedPatient.patient_id || selectedPatient.id}`}</h3>
+                      <span className="patient-id-label font-mono">ID: {selectedPatient.patient_id || selectedPatient.id}</span>
                       {getStatusBadge(selectedPatient.status)}
                       {selectedPatient.isDemoData === false ? (
                         <span className="demo-tag" style={{ background: 'rgba(16, 185, 129, 0.15)', color: 'var(--success-600, #059669)', borderColor: 'rgba(16, 185, 129, 0.3)', fontWeight: 700 }}>
@@ -527,11 +528,17 @@ export const Dashboard = () => {
                       )}
                     </div>
                     <div className="banner-details-row">
-                      <span><strong>Demographics:</strong> {selectedPatient.age} yrs, {selectedPatient.gender}</span>
+                      <span><strong>Bed:</strong> {selectedPatient.bedNumber}</span>
                       <span>•</span>
-                      <span><strong>Admitted:</strong> {selectedPatient.admissionDate}</span>
+                      {selectedPatient.age && (
+                        <>
+                          <span><strong>Demographics:</strong> {selectedPatient.age} yrs, {selectedPatient.gender}</span>
+                          <span>•</span>
+                        </>
+                      )}
+                      <span><strong>Admitted:</strong> {selectedPatient.admissionDate || 'Active'}</span>
                       <span>•</span>
-                      <span><strong>Diagnosis:</strong> {selectedPatient.diagnosis}</span>
+                      <span><strong>Status:</strong> {selectedPatient.status}</span>
                       <span>•</span>
                       <span><strong>Freshness:</strong> {selectedPatient.lastUpdated}</span>
                     </div>
@@ -1117,11 +1124,11 @@ export const Dashboard = () => {
             </div>
           ) : (
             <div className="history-card-grid">
-              {dischargedHistory.map(h => (
-                <div key={h.admissionId} className="history-patient-card">
+              {dischargedHistory.map((h, idx) => (
+                <div key={h.patientId || h.admissionId || idx} className="history-patient-card">
                   <div className="history-card-header flex-between">
                     <div>
-                      <h4 className="patient-name-bold">{h.patientName}</h4>
+                      <h4 className="patient-name-bold">{h.patientName || `Patient ${h.patientId}`}</h4>
                       <span className="patient-meta-text">
                         Patient ID: <strong className="font-mono">{h.patientId}</strong> {h.mrn ? `• MRN: ${h.mrn}` : ''}
                       </span>
@@ -1142,7 +1149,7 @@ export const Dashboard = () => {
 
                   <div className="history-diag-text">
                     <p style={{ margin: '0 0 4px 0', fontSize: '11.5px', color: 'var(--text-secondary)' }}>
-                      <strong>Bed Stayed:</strong> {h.bedNumber} • <strong>Diagnosis:</strong> {h.diagnosis}
+                      <strong>Bed Stayed:</strong> {h.bedNumber} • <strong>Status:</strong> {h.status}
                     </p>
                     {h.dischargeNotes && (
                       <p style={{ margin: 0, fontSize: '11.5px', color: 'var(--text-primary)', fontStyle: 'italic' }}>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   UserPlus, 
   X, 
@@ -44,108 +44,103 @@ export const AddPatientModal = ({ isOpen, onClose, initialBed = null }) => {
   const [serverError, setServerError] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Current local date & time strings
-  const todayDateStr = useMemo(() => {
+  // Track previous open state to only trigger initialization on open transition
+  const prevIsOpenRef = useRef(false);
+
+  // Current local date string helper
+  const getTodayDateStr = () => {
     const now = new Date();
     const year = now.getFullYear();
     const month = String(now.getMonth() + 1).padStart(2, '0');
     const day = String(now.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
-  }, []);
+  };
 
-  const currentTimeStr = useMemo(() => {
+  const getCurrentTimeStr = () => {
     const now = new Date();
     const hours = String(now.getHours()).padStart(2, '0');
     const minutes = String(now.getMinutes()).padStart(2, '0');
     return `${hours}:${minutes}`;
-  }, []);
+  };
 
-  // When modal opens, fetch sequential next ID and latest bed statuses
+  const todayDateStr = useMemo(() => getTodayDateStr(), []);
+
+  // When modal opens (transition false -> true), fetch sequential next ID and latest bed statuses
   useEffect(() => {
-    if (isOpen) {
+    const isOpening = isOpen && !prevIsOpenRef.current;
+    prevIsOpenRef.current = isOpen;
+
+    if (isOpening) {
       setServerError(null);
       setErrors({});
       setIsLoadingNextId(true);
 
-      const defaultDate = todayDateStr;
-      const defaultTime = currentTimeStr;
+      const defaultDate = getTodayDateStr();
+      const defaultTime = getCurrentTimeStr();
 
-      // 1. Build map of occupied beds from all12Beds in context
-      const occMap = new Map();
-      all12Beds.forEach(b => {
-        if (b.isOccupied) {
-          occMap.set(b.bedNumber, b.patientName || `Patient ${b.patientId}`);
-        }
-      });
-      setOccupiedBedsMap(occMap);
+      // Parallel fetch for authoritative predicted next ID and fresh bed occupancy
+      Promise.allSettled([
+        apiService.getNextPatientId(),
+        apiService.getBedStatuses()
+      ]).then(([idRes, bedsRes]) => {
+        const nextId = (idRes.status === 'fulfilled' && idRes.value?.nextPatientId)
+          ? idRes.value.nextPatientId
+          : '001';
 
-      // 2. Pick target bed (initialBed or first available bed)
-      let targetBed = initialBed && !occMap.has(initialBed) ? initialBed : null;
-      if (!targetBed) {
-        targetBed = FIXED_ICU_BEDS.find(b => !occMap.has(b)) || FIXED_ICU_BEDS[0];
-      }
-
-      // 3. Fetch authoritative predicted next ID from backend sequence
-      apiService.getNextPatientId()
-        .then(res => {
-          const nextId = res?.nextPatientId || '001';
-          setFormData({
-            id: nextId,
-            mrn: '',
-            fullName: '',
-            age: '',
-            gender: 'Male',
-            bedNumber: targetBed,
-            diagnosis: '',
-            admissionDate: defaultDate,
-            admissionTime: defaultTime,
-            status: 'Stable',
-            ventilatorAttached: false
-          });
-        })
-        .catch(() => {
-          setFormData({
-            id: '001',
-            mrn: '',
-            fullName: '',
-            age: '',
-            gender: 'Male',
-            bedNumber: targetBed,
-            diagnosis: '',
-            admissionDate: defaultDate,
-            admissionTime: defaultTime,
-            status: 'Stable',
-            ventilatorAttached: false
-          });
-        })
-        .finally(() => {
-          setIsLoadingNextId(false);
-        });
-
-      // Also refresh bed statuses directly to ensure freshest state
-      apiService.getBedStatuses()
-        .then(res => {
-          if (res?.success && Array.isArray(res.data)) {
-            const freshOccMap = new Map();
-            res.data.forEach(b => {
-              if (b.isOccupied) {
-                freshOccMap.set(b.bedNumber, b.patientName || `Patient ${b.patientId}`);
-              }
-            });
-            setOccupiedBedsMap(freshOccMap);
-            
-            // Adjust selected bed if it just became occupied
-            if (freshOccMap.has(targetBed)) {
-              const alternativeAvailable = FIXED_ICU_BEDS.find(b => !freshOccMap.has(b));
-              if (alternativeAvailable) {
-                setFormData(prev => ({ ...prev, bedNumber: alternativeAvailable }));
-              }
+        const freshOccMap = new Map();
+        if (bedsRes.status === 'fulfilled' && bedsRes.value?.success && Array.isArray(bedsRes.value.data)) {
+          bedsRes.value.data.forEach(b => {
+            if (b.isOccupied) {
+              freshOccMap.set(b.bedNumber, b.patientName || `Patient ${b.patientId}`);
             }
-          }
-        })
-        .catch(() => {});
+          });
+        } else {
+          all12Beds.forEach(b => {
+            if (b.isOccupied) {
+              freshOccMap.set(b.bedNumber, b.patientName || `Patient ${b.patientId}`);
+            }
+          });
+        }
+
+        setOccupiedBedsMap(freshOccMap);
+
+        let targetBed = initialBed && !freshOccMap.has(initialBed) ? initialBed : null;
+        if (!targetBed) {
+          targetBed = FIXED_ICU_BEDS.find(b => !freshOccMap.has(b)) || FIXED_ICU_BEDS[0];
+        }
+
+        setFormData({
+          id: nextId,
+          mrn: '',
+          fullName: '',
+          age: '',
+          gender: 'Male',
+          bedNumber: targetBed,
+          diagnosis: '',
+          admissionDate: defaultDate,
+          admissionTime: defaultTime,
+          status: 'Stable',
+          ventilatorAttached: false
+        });
+      }).catch(() => {
+        setFormData({
+          id: '001',
+          mrn: '',
+          fullName: '',
+          age: '',
+          gender: 'Male',
+          bedNumber: initialBed || FIXED_ICU_BEDS[0],
+          diagnosis: '',
+          admissionDate: defaultDate,
+          admissionTime: defaultTime,
+          status: 'Stable',
+          ventilatorAttached: false
+        });
+      }).finally(() => {
+        setIsLoadingNextId(false);
+      });
     }
-  }, [isOpen, initialBed, all12Beds, todayDateStr, currentTimeStr]);
+  }, [isOpen, initialBed]);
 
   if (!isOpen) return null;
 
@@ -217,12 +212,14 @@ export const AddPatientModal = ({ isOpen, onClose, initialBed = null }) => {
     setIsSubmitting(true);
     try {
       const payload = {
+        patient_id: formData.id ? formData.id.trim() : undefined,
         id: formData.id ? formData.id.trim() : undefined,
+        bed_id: formData.bedNumber.trim(),
+        bed_number: formData.bedNumber.trim(),
         mrn: formData.mrn.trim() || null,
         full_name: formData.fullName.trim(),
         age: parseInt(formData.age, 10),
         gender: formData.gender,
-        bed_number: formData.bedNumber.trim(),
         diagnosis: formData.diagnosis.trim(),
         admission_date: formData.admissionDate,
         admission_time: formData.admissionTime,

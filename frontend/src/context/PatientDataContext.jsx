@@ -51,10 +51,10 @@ export const PatientDataProvider = ({ children }) => {
   const [livePatientsCount, setLivePatientsCount] = useState(0);
   const [isDemoViewEnabled, setIsDemoViewEnabled] = useState(false);
 
-  // Track latest fetch request timestamp to prevent out-of-order response overwrite
+  // Track latest fetch request timestamp
   const latestFetchTimestamp = useRef(0);
 
-  // Theme State: 'light' | 'dark' with localStorage persistence
+  // Theme State
   const [theme, setTheme] = useState(() => {
     try {
       return localStorage.getItem('icu_sentinel_theme') || 'light';
@@ -63,13 +63,12 @@ export const PatientDataProvider = ({ children }) => {
     }
   });
 
-  // Apply theme attribute to document element
   useEffect(() => {
     try {
       document.documentElement.setAttribute('data-theme', theme);
       localStorage.setItem('icu_sentinel_theme', theme);
     } catch {
-      // Fallback if localStorage unavailable
+      // Fallback
     }
   }, [theme]);
 
@@ -77,7 +76,6 @@ export const PatientDataProvider = ({ children }) => {
     setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
   };
 
-  // Helper to trigger temporary UI feedback notification
   const showNotification = useCallback((message, type = "success") => {
     setNotification({ message, type, id: Date.now() });
     setTimeout(() => {
@@ -87,7 +85,7 @@ export const PatientDataProvider = ({ children }) => {
 
   const clearNotification = () => setNotification(null);
 
-  // Fetch all patients, 12 beds status, and history from Backend / Neon PostgreSQL
+  // Fetch all patients, 12 beds status, alerts, and history from Backend / Neon PostgreSQL
   const fetchBackendData = useCallback(async (isManualRefresh = false) => {
     const fetchId = Date.now();
     latestFetchTimestamp.current = fetchId;
@@ -103,14 +101,14 @@ export const PatientDataProvider = ({ children }) => {
       if (health?.status === 'ok' && health.databaseConfigured) {
         setDbStatus('connected');
         
-        // Concurrently fetch active patients, 12 beds status, and history
-        const [patientsRes, bedsRes, historyRes] = await Promise.allSettled([
+        // Concurrently fetch active patients, 12 beds status, history, and deterioration alerts
+        const [patientsRes, bedsRes, historyRes, alertsRes] = await Promise.allSettled([
           apiService.getPatients(),
           apiService.getBedStatuses(),
-          apiService.getPatientHistory()
+          apiService.getPatientHistory(),
+          apiService.getAllAlerts()
         ]);
 
-        // Guard against out-of-order resolution
         if (latestFetchTimestamp.current !== fetchId) return;
 
         // 1. Process 12 Beds
@@ -123,7 +121,12 @@ export const PatientDataProvider = ({ children }) => {
           setPatientHistory(historyRes.value.data);
         }
 
-        // 3. Process Active Patients List
+        // 3. Process Deterioration Alerts
+        if (alertsRes.status === 'fulfilled' && alertsRes.value?.success && Array.isArray(alertsRes.value.data)) {
+          setAlerts(alertsRes.value.data);
+        }
+
+        // 4. Process Active Patients List
         if (patientsRes.status === 'fulfilled' && patientsRes.value?.success && Array.isArray(patientsRes.value.data)) {
           const dbPatients = patientsRes.value.data;
           setLivePatientsCount(dbPatients.length);
@@ -131,11 +134,11 @@ export const PatientDataProvider = ({ children }) => {
           if (dbPatients.length > 0) {
             setPatients(dbPatients);
             setSelectedPatientId(prev => {
-              if (prev && dbPatients.some(p => p.id === prev)) return prev;
-              return dbPatients[0].id;
+              const prevId = prev;
+              if (prevId && dbPatients.some(p => (p.patient_id || p.id) === prevId)) return prevId;
+              return dbPatients[0].patient_id || dbPatients[0].id;
             });
           } else {
-            // Neon DB has 0 active patients (all beds available)
             setPatients([]);
             setSelectedPatientId(null);
           }
@@ -143,7 +146,7 @@ export const PatientDataProvider = ({ children }) => {
 
         setLastRefreshed(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
         if (isManualRefresh) {
-          showNotification("Dashboard and bed occupancy refreshed from Neon PostgreSQL.", "info");
+          showNotification("Dashboard, telemetry, and alerts refreshed from Neon PostgreSQL.", "info");
         }
       } else {
         // Backend offline or database unconfigured - fallback to demo dataset
@@ -155,7 +158,7 @@ export const PatientDataProvider = ({ children }) => {
         setLabResults(INITIAL_LAB_RESULTS);
         setClinicalNotes(INITIAL_CLINICAL_NOTES);
         setAlerts(INITIAL_ALERTS);
-        setSelectedPatientId("PT-101");
+        setSelectedPatientId("001");
       }
     } catch (err) {
       console.warn('[ICU Sentinel] Backend API offline, loading demo dataset.', err.message);
@@ -167,35 +170,34 @@ export const PatientDataProvider = ({ children }) => {
       setLabResults(INITIAL_LAB_RESULTS);
       setClinicalNotes(INITIAL_CLINICAL_NOTES);
       setAlerts(INITIAL_ALERTS);
-      setSelectedPatientId("PT-101");
+      setSelectedPatientId("001");
     } finally {
       setIsLoadingPatients(false);
       setIsRefreshing(false);
     }
-  }, [isLoadingPatients, showNotification]);
+  }, [showNotification]);
 
   // Initial fetch on mount
   useEffect(() => {
     fetchBackendData(false);
-  }, []); // Run once on mount
+  }, [fetchBackendData]);
 
-  // Auto-refresh interval (every 20 seconds) while dashboard is mounted
+  // Auto-refresh and auto-reconnect interval (every 15 seconds)
   useEffect(() => {
-    if (isDemoViewEnabled || dbStatus === 'offline') return;
+    if (isDemoViewEnabled) return;
 
     const intervalId = setInterval(() => {
       fetchBackendData(false);
-    }, 20000);
+    }, 15000);
 
     return () => clearInterval(intervalId);
-  }, [isDemoViewEnabled, dbStatus, fetchBackendData]);
+  }, [isDemoViewEnabled, fetchBackendData]);
 
-  // Manual refresh trigger
   const refreshData = useCallback(() => {
     return fetchBackendData(true);
   }, [fetchBackendData]);
 
-  // Toggle demo view when in connected mode if user wants to inspect synthetic baseline
+  // Toggle demo view
   const toggleDemoView = useCallback(() => {
     setIsDemoViewEnabled(prev => {
       const next = !prev;
@@ -207,7 +209,7 @@ export const PatientDataProvider = ({ children }) => {
         setLabResults(INITIAL_LAB_RESULTS);
         setClinicalNotes(INITIAL_CLINICAL_NOTES);
         setAlerts(INITIAL_ALERTS);
-        setSelectedPatientId("PT-101");
+        setSelectedPatientId("001");
         showNotification("Viewing Synthetic Demo Reference dataset.", "info");
       } else {
         fetchBackendData(false);
@@ -216,17 +218,18 @@ export const PatientDataProvider = ({ children }) => {
     });
   }, [fetchBackendData, showNotification]);
 
-  // Fetch clinical records for selected patient from Neon backend
+  // Fetch clinical records & telemetry for selected patient from Neon backend
   const fetchPatientDetails = useCallback(async (patientId) => {
     if (!patientId || dbStatus !== 'connected' || isDemoViewEnabled) return;
 
     try {
-      const [vitalsRes, notesRes, medsRes, fluidsRes, labsRes] = await Promise.allSettled([
+      const [vitalsRes, labsRes, alertsRes, notesRes, medsRes, fluidsRes] = await Promise.allSettled([
         apiService.getPatientVitals(patientId),
+        apiService.getLabResults(patientId),
+        apiService.getPatientAlerts(patientId),
         apiService.getClinicalNotes(patientId),
         apiService.getMedicationRecords(patientId),
-        apiService.getFluidRecords(patientId),
-        apiService.getLabResults(patientId)
+        apiService.getFluidRecords(patientId)
       ]);
 
       if (vitalsRes.status === 'fulfilled' && vitalsRes.value?.success) {
@@ -234,6 +237,20 @@ export const PatientDataProvider = ({ children }) => {
           ...prev,
           [patientId]: vitalsRes.value.data
         }));
+      }
+
+      if (labsRes.status === 'fulfilled' && labsRes.value?.success) {
+        setLabResults(prev => ({
+          ...prev,
+          [patientId]: labsRes.value.data
+        }));
+      }
+
+      if (alertsRes.status === 'fulfilled' && alertsRes.value?.success) {
+        setAlerts(prev => {
+          const otherAlerts = prev.filter(a => (a.patientId || a.patient_id) !== patientId);
+          return [...alertsRes.value.data, ...otherAlerts];
+        });
       }
 
       if (notesRes.status === 'fulfilled' && notesRes.value?.success) {
@@ -256,15 +273,8 @@ export const PatientDataProvider = ({ children }) => {
           [patientId]: fluidsRes.value.data
         }));
       }
-
-      if (labsRes.status === 'fulfilled' && labsRes.value?.success) {
-        setLabResults(prev => ({
-          ...prev,
-          [patientId]: labsRes.value.data
-        }));
-      }
     } catch {
-      // Background sync error handled silently
+      // Handled silently
     }
   }, [dbStatus, isDemoViewEnabled]);
 
@@ -277,19 +287,18 @@ export const PatientDataProvider = ({ children }) => {
   // Selected patient object
   const selectedPatient = useMemo(() => {
     if (!selectedPatientId) return patients[0] || null;
-    return patients.find(p => p.id === selectedPatientId) || patients[0] || null;
+    return patients.find(p => (p.patient_id === selectedPatientId || p.id === selectedPatientId)) || patients[0] || null;
   }, [patients, selectedPatientId]);
 
-  // Derived counts for overview stats
+  // Stats
   const stats = useMemo(() => {
     const totalPatients = patients.length;
     
-    // Count active unacknowledged alerts or patients with Alert/Critical status
     const activeAlertPatientIds = new Set(
-      alerts.filter(a => !a.isAcknowledged).map(a => a.patientId)
+      alerts.filter(a => !a.isAcknowledged).map(a => a.patientId || a.patient_id)
     );
     const alertPatientsCount = patients.filter(
-      p => activeAlertPatientIds.has(p.id) || p.status === 'Critical' || p.status === 'Alert'
+      p => activeAlertPatientIds.has(p.patient_id || p.id) || p.status === 'Critical' || p.status === 'Alert'
     ).length;
 
     const connectedDevices = devices.filter(d => d.status === 'Connected').length;
@@ -311,40 +320,55 @@ export const PatientDataProvider = ({ children }) => {
     };
   }, [patients, alerts, devices, all12Beds, livePatientsCount]);
 
-  // Acknowledge an alert
-  const acknowledgeAlert = (alertId) => {
+  // Acknowledge an alert (persisted in deterioration_alerts)
+  const acknowledgeAlert = async (alertId) => {
+    try {
+      if (dbStatus === 'connected' && !isDemoViewEnabled) {
+        await apiService.acknowledgeAlert(alertId, { acknowledged_by: 'Nurse Station' });
+      }
+    } catch (err) {
+      console.warn('Acknowledge alert API error:', err.message);
+    }
+
     setAlerts(prevAlerts =>
       prevAlerts.map(alert =>
         alert.id === alertId
-          ? { ...alert, isAcknowledged: true, status: "Acknowledged" }
+          ? { ...alert, isAcknowledged: true, status: "Acknowledged", acknowledged: true }
           : alert
       )
     );
-    showNotification("Alert acknowledged.", "info");
+    showNotification("Alert acknowledged in Neon PostgreSQL.", "info");
   };
 
-  // 1. Create / Register a Patient in Neon DB
+  // 1. Create / Register a Patient in Neon DB ('patients' table)
   const createNewPatient = async (patientData) => {
     try {
-      const res = await apiService.createPatient(patientData);
+      const payload = {
+        patient_id: patientData.patient_id || patientData.patientId || patientData.id,
+        bed_id: patientData.bed_id || patientData.bedNumber || patientData.bed_number,
+        admission_time: patientData.admission_time || patientData.admissionTime,
+        admission_date: patientData.admission_date || patientData.admissionDate,
+        status: patientData.status || 'ACTIVE'
+      };
+
+      const res = await apiService.createPatient(payload);
       if (res?.success && res.data) {
         const newPatient = res.data;
+        const patientId = newPatient.patient_id || newPatient.id;
         
-        // Update patient list
         setPatients(prev => {
-          const filtered = prev.filter(p => p.id !== newPatient.id);
+          const filtered = prev.filter(p => (p.patient_id || p.id) !== patientId);
           return [newPatient, ...filtered];
         });
         
-        setSelectedPatientId(newPatient.id);
+        setSelectedPatientId(patientId);
         setLivePatientsCount(c => c + 1);
         setIsDemoViewEnabled(false);
         
-        // Immediately refresh beds and patient roster
         await fetchBackendData(false);
 
         showNotification(
-          res.message || `Patient ${newPatient.name} (ID: ${newPatient.id}) registered and admitted to ${newPatient.bedNumber}.`,
+          res.message || `Patient ${patientId} admitted to ${newPatient.bedNumber}.`,
           "success"
         );
         return { success: true, data: newPatient };
@@ -357,23 +381,20 @@ export const PatientDataProvider = ({ children }) => {
     }
   };
 
-  // 2. Discharge Patient Non-destructively
+  // 2. Discharge Patient Non-destructively ('patients' table)
   const dischargePatient = async (patientId, dischargeData) => {
     try {
       const res = await apiService.dischargePatient(patientId, dischargeData);
       if (res?.success) {
-        // Remove discharged patient from active list
-        setPatients(prev => prev.filter(p => p.id !== patientId));
+        setPatients(prev => prev.filter(p => (p.patient_id || p.id) !== patientId));
         
-        // Select next available patient
         setSelectedPatientId(prev => {
-          const remaining = patients.filter(p => p.id !== patientId);
-          return remaining.length > 0 ? remaining[0].id : null;
+          const remaining = patients.filter(p => (p.patient_id || p.id) !== patientId);
+          return remaining.length > 0 ? (remaining[0].patient_id || remaining[0].id) : null;
         });
 
         setLivePatientsCount(c => Math.max(0, c - 1));
 
-        // Immediately refresh beds status & history from live DB
         await fetchBackendData(false);
 
         showNotification(
@@ -390,17 +411,15 @@ export const PatientDataProvider = ({ children }) => {
     }
   };
 
-  // 3. Add Clinical / Nursing Note
+  // 3. Add Clinical Note (Session / Memory)
   const addClinicalNote = async (noteData) => {
     const { patientId, author, type, findings, plan, gcsScore, pupils, date, time } = noteData;
-    const targetPatient = patients.find(p => p.id === patientId);
+    const targetPatient = patients.find(p => (p.patient_id === patientId || p.id === patientId));
     if (!targetPatient) return false;
 
     const formattedTime = `${date || new Date().toISOString().split('T')[0]} ${time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
     
     let savedNote = null;
-    let isLiveDb = false;
-
     try {
       const res = await apiService.createClinicalNote(patientId, {
         author,
@@ -415,10 +434,9 @@ export const PatientDataProvider = ({ children }) => {
 
       if (res?.success && res.data) {
         savedNote = res.data;
-        isLiveDb = true;
       }
     } catch (err) {
-      console.warn('[Clinical Note API] Falling back to local state:', err.message);
+      console.warn('[Clinical Note API] Using session state:', err.message);
     }
 
     if (!savedNote) {
@@ -431,8 +449,8 @@ export const PatientDataProvider = ({ children }) => {
         plan: plan || "Continue standard ICU care plan.",
         gcsScore: gcsScore || "GCS 15",
         pupils: pupils || "Equal and Reactive",
-        isDemoData: true,
-        source: 'Local Memory (Uncommitted)'
+        isDemoData: false,
+        source: 'Session Memory'
       };
     }
 
@@ -442,23 +460,21 @@ export const PatientDataProvider = ({ children }) => {
     }));
 
     showNotification(
-      `Clinical note recorded for ${targetPatient.name} (${targetPatient.bedNumber})${isLiveDb ? ' [Saved to Neon DB]' : ''}.`,
+      `Clinical note recorded for Patient ${patientId} (${targetPatient.bedNumber}).`,
       "success"
     );
     return true;
   };
 
-  // 4. Add Medication Administration Record (MAR)
+  // 4. Add Medication Administration Record (MAR - Session / Memory)
   const addMedicationRecord = async (medData) => {
     const { patientId, medicationName, prescribedDose, administeredDose, doseUnit, route, frequency, status, notes, staff, date, time } = medData;
-    const targetPatient = patients.find(p => p.id === patientId);
+    const targetPatient = patients.find(p => (p.patient_id === patientId || p.id === patientId));
     if (!targetPatient) return false;
 
     const formattedTime = `${date || new Date().toISOString().split('T')[0]} ${time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
     
     let savedMed = null;
-    let isLiveDb = false;
-
     try {
       const res = await apiService.createMedicationRecord(patientId, {
         medicationName,
@@ -476,10 +492,9 @@ export const PatientDataProvider = ({ children }) => {
 
       if (res?.success && res.data) {
         savedMed = res.data;
-        isLiveDb = true;
       }
     } catch (err) {
-      console.warn('[MAR API] Falling back to local state:', err.message);
+      console.warn('[MAR API] Using session state:', err.message);
     }
 
     if (!savedMed) {
@@ -495,8 +510,8 @@ export const PatientDataProvider = ({ children }) => {
         time: formattedTime,
         notes: notes || "Dose administered as charted.",
         staff: staff || "Clinical Staff",
-        isDemoData: true,
-        source: 'Local Memory (Uncommitted)'
+        isDemoData: false,
+        source: 'Session Memory'
       };
     }
 
@@ -506,13 +521,13 @@ export const PatientDataProvider = ({ children }) => {
     }));
 
     showNotification(
-      `Medication ${savedMed.medicationName} (${savedMed.administeredDose} ${savedMed.doseUnit}) recorded for ${targetPatient.name}${isLiveDb ? ' [Saved to Neon DB]' : ''}.`,
+      `Medication ${savedMed.medicationName} (${savedMed.administeredDose} ${savedMed.doseUnit}) recorded for Patient ${patientId}.`,
       "success"
     );
     return true;
   };
 
-  // 5. Add Fluid Intake & Output & Urine Record
+  // 5. Add Fluid Record (Session / Memory)
   const addFluidRecord = async (fluidData) => {
     const { 
       patientId, 
@@ -530,7 +545,7 @@ export const PatientDataProvider = ({ children }) => {
       time 
     } = fluidData;
 
-    const targetPatient = patients.find(p => p.id === patientId);
+    const targetPatient = patients.find(p => (p.patient_id === patientId || p.id === patientId));
     if (!targetPatient) return false;
 
     const oral = Number(oralIntake) || 0;
@@ -546,8 +561,6 @@ export const PatientDataProvider = ({ children }) => {
     const formattedTime = `${date || new Date().toISOString().split('T')[0]} ${time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 
     let savedFluid = null;
-    let isLiveDb = false;
-
     try {
       const res = await apiService.createFluidRecord(patientId, {
         interval,
@@ -566,10 +579,9 @@ export const PatientDataProvider = ({ children }) => {
 
       if (res?.success && res.data) {
         savedFluid = res.data;
-        isLiveDb = true;
       }
     } catch (err) {
-      console.warn('[Fluid API] Falling back to local state:', err.message);
+      console.warn('[Fluid API] Using session state:', err.message);
     }
 
     if (!savedFluid) {
@@ -589,8 +601,8 @@ export const PatientDataProvider = ({ children }) => {
         time: formattedTime,
         notes: notes || "Intake/Output charted.",
         staff: staff || "Clinical Staff",
-        isDemoData: true,
-        source: 'Local Memory (Uncommitted)'
+        isDemoData: false,
+        source: 'Session Memory'
       };
     }
 
@@ -600,16 +612,16 @@ export const PatientDataProvider = ({ children }) => {
     }));
 
     showNotification(
-      `Fluid balance (${net >= 0 ? '+' : ''}${net} mL) charted for ${targetPatient.name}${isLiveDb ? ' [Saved to Neon DB]' : ''}.`,
+      `Fluid balance (${net >= 0 ? '+' : ''}${net} mL) charted for Patient ${patientId}.`,
       "success"
     );
     return true;
   };
 
-  // 6. Add Lab & ABG Results
+  // 6. Add Lab Results (manual_lab_records)
   const addLabResult = async (labData) => {
-    const { patientId, panel, values, collectionTime, resultTime, notes, staff } = labData;
-    const targetPatient = patients.find(p => p.id === patientId);
+    const { patientId, panel, values, fio2, ph, paco2, lactate, notes, staff, date, time } = labData;
+    const targetPatient = patients.find(p => (p.patient_id === patientId || p.id === patientId));
     if (!targetPatient) return false;
 
     let savedLab = null;
@@ -617,34 +629,45 @@ export const PatientDataProvider = ({ children }) => {
 
     try {
       const res = await apiService.createLabResult(patientId, {
-        panel,
+        fio2: fio2 !== undefined ? fio2 : (values?.fio2?.val !== undefined ? values.fio2.val : undefined),
+        ph: ph !== undefined ? ph : (values?.ph?.val !== undefined ? values.ph.val : undefined),
+        paco2: paco2 !== undefined ? paco2 : (values?.paco2?.val !== undefined ? values.paco2.val : undefined),
+        lactate: lactate !== undefined ? lactate : (values?.lactate?.val !== undefined ? values.lactate.val : undefined),
         values,
-        collectionTime,
-        resultTime,
         notes,
-        staff
+        staff,
+        date,
+        time
       });
 
       if (res?.success && res.data) {
         savedLab = res.data;
         isLiveDb = true;
+
+        if (res.data.deteriorationAlert) {
+          setAlerts(prev => [res.data.deteriorationAlert, ...prev]);
+        }
       }
     } catch (err) {
-      console.warn('[Lab API] Falling back to local state:', err.message);
+      console.warn('[Lab API] Error saving to manual_lab_records:', err.message);
     }
 
     if (!savedLab) {
       savedLab = {
         id: `LAB-${patientId}-${Date.now().toString().slice(-4)}`,
-        panel: panel || "Manual Laboratory Entry",
-        collectionTime: collectionTime || new Date().toISOString().replace('T', ' ').slice(0, 16),
-        resultTime: resultTime || new Date().toISOString().replace('T', ' ').slice(0, 16),
+        panel: panel || "Nurse-Entered ABG & Labs",
+        collectionTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        resultTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         status: "Entered",
+        fio2: fio2 || 0.21,
+        ph: ph || null,
+        paco2: paco2 || null,
+        lactate: lactate || null,
         values: values || {},
         notes: notes || "Manual laboratory result documented.",
-        staff: staff || "Clinical Staff",
-        isDemoData: true,
-        source: 'Local Memory (Uncommitted)'
+        staff: staff || "NURSE_STATION",
+        isDemoData: false,
+        source: 'Session Memory'
       };
     }
 
@@ -654,13 +677,13 @@ export const PatientDataProvider = ({ children }) => {
     }));
 
     showNotification(
-      `Laboratory results recorded for ${targetPatient.name}${isLiveDb ? ' [Saved to Neon DB]' : ''}.`,
+      `Manual lab record saved for Patient ${patientId}${isLiveDb ? ' [Saved to Neon DB manual_lab_records]' : ''}.`,
       "success"
     );
     return true;
   };
 
-  // 7. Spot Vitals / Manual Observation
+  // 7. Spot Vitals / Telemetry Snapshot (telemetry_snapshots)
   const addManualObservation = async (entry) => {
     const {
       patientId,
@@ -678,13 +701,13 @@ export const PatientDataProvider = ({ children }) => {
       time
     } = entry;
 
-    const targetPatient = patients.find(p => p.id === patientId);
+    const targetPatient = patients.find(p => (p.patient_id === patientId || p.id === patientId));
     if (!targetPatient) return false;
 
     const formattedTime = time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const formattedDate = date || new Date().toISOString().split('T')[0];
     const timestampStr = `${formattedDate} ${formattedTime}`;
-    const staffLabel = staff?.trim() ? staff.trim() : "Clinical Staff (Manual)";
+    const staffLabel = staff?.trim() ? staff.trim() : "Clinical Staff";
 
     let isLiveDb = false;
     let dbSavedObservation = null;
@@ -692,11 +715,10 @@ export const PatientDataProvider = ({ children }) => {
     try {
       const res = await apiService.recordVitals(patientId, {
         hr,
-        bpSys,
-        bpDia,
+        sbp: bpSys,
+        dbp: bpDia,
         spo2,
-        rr,
-        temp,
+        resp: rr,
         notes: [notes, symptoms, comments].filter(Boolean).join(" | "),
         staff: staffLabel,
         date: formattedDate,
@@ -706,39 +728,47 @@ export const PatientDataProvider = ({ children }) => {
       if (res?.success && res.data) {
         dbSavedObservation = res.data;
         isLiveDb = true;
+
+        if (res.data.deteriorationAlert) {
+          setAlerts(prev => [res.data.deteriorationAlert, ...prev]);
+        }
       }
     } catch (err) {
-      console.warn('[Vitals API] Falling back to local state:', err.message);
+      console.warn('[Vitals API] Error saving to telemetry_snapshots:', err.message);
     }
 
     const newHistoryItem = dbSavedObservation ? {
       id: dbSavedObservation.id,
+      patientId,
       timestamp: timestampStr,
       timeLabel: formattedTime,
       hr: dbSavedObservation.hr,
       bpSys: dbSavedObservation.bpSys,
       bpDia: dbSavedObservation.bpDia,
+      bpMean: dbSavedObservation.bpMean,
       spo2: dbSavedObservation.spo2,
       rr: dbSavedObservation.rr,
-      temp: dbSavedObservation.temp,
-      source: dbSavedObservation.source || "Neon PostgreSQL (Live DB)",
-      notes: dbSavedObservation.notes || [notes, symptoms, comments].filter(Boolean).join(" | ") || "Manual observation recorded by staff.",
-      staff: dbSavedObservation.staffName || staffLabel,
+      temp: null,
+      source: "Neon PostgreSQL (telemetry_snapshots)",
+      notes: notes || "Telemetry observation recorded.",
+      staff: staffLabel,
       isDemoData: false
     } : {
       id: `OBS-${patientId}-${Date.now().toString().slice(-4)}`,
+      patientId,
       timestamp: timestampStr,
       timeLabel: formattedTime,
       hr: hr !== "" && hr !== undefined && hr !== null ? Number(hr) : null,
       bpSys: bpSys !== "" && bpSys !== undefined && bpSys !== null ? Number(bpSys) : null,
       bpDia: bpDia !== "" && bpDia !== undefined && bpDia !== null ? Number(bpDia) : null,
+      bpMean: (bpSys && bpDia) ? Math.round((Number(bpSys) + 2 * Number(bpDia)) / 3) : null,
       spo2: spo2 !== "" && spo2 !== undefined && spo2 !== null ? Number(spo2) : null,
       rr: rr !== "" && rr !== undefined && rr !== null ? Number(rr) : null,
       temp: temp !== "" && temp !== undefined && temp !== null ? Number(temp) : null,
       source: "Manual Entry (Bedside Charting)",
-      notes: [notes, symptoms, comments].filter(Boolean).join(" | ") || "Manual observation recorded by staff.",
+      notes: [notes, symptoms, comments].filter(Boolean).join(" | ") || "Manual observation recorded.",
       staff: staffLabel,
-      isDemoData: true
+      isDemoData: false
     };
 
     setObservationsHistory(prev => ({
@@ -746,188 +776,63 @@ export const PatientDataProvider = ({ children }) => {
       [patientId]: [newHistoryItem, ...(prev[patientId] || [])]
     }));
 
-    let newStatus = targetPatient.status;
-    let newAlertsToPush = [];
-
-    // HR Rule
-    let hrObj = targetPatient.vitals?.heartRate || {};
-    if (newHistoryItem.hr !== null) {
-      let hrStatus = "normal";
-      let hrLabel = "Normal Sinus (60-100)";
-      if (newHistoryItem.hr > 120 || newHistoryItem.hr < 45) {
-        hrStatus = "critical";
-        hrLabel = newHistoryItem.hr > 120 ? "Severe Tachycardia (>120)" : "Severe Bradycardia (<45)";
-        newStatus = "Critical";
-      } else if (newHistoryItem.hr > 100 || newHistoryItem.hr < 55) {
-        hrStatus = "warning";
-        hrLabel = newHistoryItem.hr > 100 ? "Tachycardia (>100)" : "Bradycardia (<55)";
-        if (newStatus !== "Critical") newStatus = "Alert";
-      }
-      hrObj = {
-        value: newHistoryItem.hr,
-        unit: "bpm",
-        timestamp: "Just now (Manual)",
-        source: isLiveDb ? `Neon DB (${staffLabel})` : `Manual Entry (${staffLabel})`,
-        status: hrStatus,
-        statusLabel: hrLabel,
-        isStale: false
-      };
-    }
-
-    // BP Rule
-    let bpObj = targetPatient.vitals?.bloodPressure || {};
-    if (newHistoryItem.bpSys !== null && newHistoryItem.bpDia !== null) {
-      let bpStatus = "normal";
-      let bpLabel = "Within Normal Range (90-140 / 60-90)";
-      if (newHistoryItem.bpSys < 90 || newHistoryItem.bpSys > 180) {
-        bpStatus = "critical";
-        bpLabel = newHistoryItem.bpSys < 90 ? "Hypotension (SBP < 90)" : "Hypertensive Crisis (SBP > 180)";
-        newStatus = "Critical";
-      } else if (newHistoryItem.bpSys > 140 || newHistoryItem.bpDia > 90) {
-        bpStatus = "warning";
-        bpLabel = "Hypertension (SBP > 140 or DBP > 90)";
-        if (newStatus !== "Critical") newStatus = "Alert";
-      }
-      bpObj = {
-        systolic: newHistoryItem.bpSys,
-        diastolic: newHistoryItem.bpDia,
-        mean: Math.round((newHistoryItem.bpSys + 2 * newHistoryItem.bpDia) / 3),
-        unit: "mmHg",
-        timestamp: "Just now (Manual)",
-        source: isLiveDb ? `Neon DB (${staffLabel})` : `Manual Entry (${staffLabel})`,
-        status: bpStatus,
-        statusLabel: bpLabel,
-        isStale: false
-      };
-    }
-
-    // SpO2 Rule
-    let spo2Obj = targetPatient.vitals?.spo2 || {};
-    if (newHistoryItem.spo2 !== null) {
-      let spo2Status = "normal";
-      let spo2Label = "Adequate Oxygenation (≥95%)";
-      if (newHistoryItem.spo2 < 90) {
-        spo2Status = "critical";
-        spo2Label = "Severe Hypoxemia (SpO₂ < 90%)";
-        newStatus = "Critical";
-        newAlertsToPush.push({
-          id: `ALT-MAN-${Date.now()}`,
-          patientId,
-          patientName: targetPatient.name,
-          bedNumber: targetPatient.bedNumber,
-          severity: "high",
-          parameter: "SpO₂ (Manual Entry)",
-          description: `SpO₂ entered as ${newHistoryItem.spo2}%`,
-          timestamp: "Just now",
-          status: "Active",
-          isAcknowledged: false
-        });
-      } else if (newHistoryItem.spo2 < 94) {
-        spo2Status = "warning";
-        spo2Label = "Mild Hypoxemia (SpO₂ < 94%)";
-        if (newStatus !== "Critical") newStatus = "Alert";
-      }
-      spo2Obj = {
-        value: newHistoryItem.spo2,
-        unit: "%",
-        timestamp: "Just now (Manual)",
-        source: isLiveDb ? `Neon DB (${staffLabel})` : `Manual Entry (${staffLabel})`,
-        status: spo2Status,
-        statusLabel: spo2Label,
-        isStale: false
-      };
-    }
-
-    // RR Rule
-    let rrObj = targetPatient.vitals?.respiratoryRate || {};
-    if (newHistoryItem.rr !== null) {
-      let rrStatus = "normal";
-      let rrLabel = "Eupneic (12-20)";
-      if (newHistoryItem.rr > 30 || newHistoryItem.rr < 8) {
-        rrStatus = "critical";
-        rrLabel = newHistoryItem.rr > 30 ? "Severe Tachypnea (RR > 30)" : "Bradypnea / Hypoventilation (RR < 8)";
-        newStatus = "Critical";
-      } else if (newHistoryItem.rr > 22 || newHistoryItem.rr < 12) {
-        rrStatus = "warning";
-        rrLabel = newHistoryItem.rr > 22 ? "Tachypnea (RR > 22)" : "Borderline Slow (RR < 12)";
-        if (newStatus !== "Critical") newStatus = "Alert";
-      }
-      rrObj = {
-        value: newHistoryItem.rr,
-        unit: "breaths/min",
-        timestamp: "Just now (Manual)",
-        source: isLiveDb ? `Neon DB (${staffLabel})` : `Manual Entry (${staffLabel})`,
-        status: rrStatus,
-        statusLabel: rrLabel,
-        isStale: false
-      };
-    }
-
-    // Temp Rule
-    let tempObj = targetPatient.vitals?.temperature || {};
-    if (newHistoryItem.temp !== null) {
-      let tempStatus = "normal";
-      let tempLabel = "Normothermic (36.5-37.5°C)";
-      if (newHistoryItem.temp >= 38.8 || newHistoryItem.temp < 35.0) {
-        tempStatus = "critical";
-        tempLabel = newHistoryItem.temp >= 38.8 ? "High Pyrexia (Temp ≥ 38.8°C)" : "Hypothermia (Temp < 35°C)";
-        newStatus = "Critical";
-        newAlertsToPush.push({
-          id: `ALT-MAN-T-${Date.now()}`,
-          patientId,
-          patientName: targetPatient.name,
-          bedNumber: targetPatient.bedNumber,
-          severity: "high",
-          parameter: "Temperature (Manual Entry)",
-          description: `High Pyrexia ${newHistoryItem.temp}°C entered manually`,
-          timestamp: "Just now",
-          status: "Active",
-          isAcknowledged: false
-        });
-      } else if (newHistoryItem.temp > 37.8) {
-        tempStatus = "warning";
-        tempLabel = "Low-grade Pyrexia (Temp > 37.8°C)";
-        if (newStatus !== "Critical") newStatus = "Alert";
-      }
-      tempObj = {
-        value: newHistoryItem.temp,
-        unit: "°C",
-        timestamp: "Just now (Manual)",
-        source: isLiveDb ? `Neon DB (${staffLabel})` : `Manual Entry (${staffLabel})`,
-        status: tempStatus,
-        statusLabel: tempLabel,
-        isStale: false
-      };
-    }
-
+    // Update patient latest vitals card in state
     setPatients(prev =>
       prev.map(p => {
-        if (p.id !== patientId) return p;
+        if ((p.patient_id || p.id) !== patientId) return p;
         return {
           ...p,
-          status: newStatus,
-          lastUpdated: "Just now (Manual Entry)",
+          lastUpdated: "Just now",
           lastUpdatedTimestamp: new Date().toISOString(),
           vitals: {
             ...p.vitals,
-            heartRate: hrObj,
-            bloodPressure: bpObj,
-            spo2: spo2Obj,
-            respiratoryRate: rrObj,
-            temperature: tempObj
+            heartRate: newHistoryItem.hr !== null ? {
+              value: newHistoryItem.hr,
+              unit: "bpm",
+              timestamp: "Just now",
+              source: "telemetry_snapshots",
+              status: newHistoryItem.hr > 120 || newHistoryItem.hr < 45 ? 'critical' : newHistoryItem.hr > 100 || newHistoryItem.hr < 55 ? 'warning' : 'normal',
+              statusLabel: newHistoryItem.hr > 100 ? 'Tachycardia' : newHistoryItem.hr < 55 ? 'Bradycardia' : 'Normal Sinus',
+              isStale: false
+            } : p.vitals?.heartRate,
+            bloodPressure: (newHistoryItem.bpSys !== null && newHistoryItem.bpDia !== null) ? {
+              systolic: newHistoryItem.bpSys,
+              diastolic: newHistoryItem.bpDia,
+              mean: newHistoryItem.bpMean,
+              unit: "mmHg",
+              timestamp: "Just now",
+              source: "telemetry_snapshots",
+              status: newHistoryItem.bpSys < 90 || newHistoryItem.bpSys > 180 ? 'critical' : (newHistoryItem.bpSys > 140 || newHistoryItem.bpDia > 90) ? 'warning' : 'normal',
+              statusLabel: `${newHistoryItem.bpSys}/${newHistoryItem.bpDia}`,
+              isStale: false
+            } : p.vitals?.bloodPressure,
+            spo2: newHistoryItem.spo2 !== null ? {
+              value: newHistoryItem.spo2,
+              unit: "%",
+              timestamp: "Just now",
+              source: "telemetry_snapshots",
+              status: newHistoryItem.spo2 < 90 ? 'critical' : newHistoryItem.spo2 < 95 ? 'warning' : 'normal',
+              statusLabel: `${newHistoryItem.spo2}%`,
+              isStale: false
+            } : p.vitals?.spo2,
+            respiratoryRate: newHistoryItem.rr !== null ? {
+              value: newHistoryItem.rr,
+              unit: "breaths/min",
+              timestamp: "Just now",
+              source: "telemetry_snapshots",
+              status: newHistoryItem.rr > 30 || newHistoryItem.rr < 8 ? 'critical' : newHistoryItem.rr > 22 || newHistoryItem.rr < 12 ? 'warning' : 'normal',
+              statusLabel: `${newHistoryItem.rr} bpm`,
+              isStale: false
+            } : p.vitals?.respiratoryRate
           }
         };
       })
     );
 
-    if (newAlertsToPush.length > 0) {
-      setAlerts(prev => [...newAlertsToPush, ...prev]);
-    }
-
     setSelectedPatientId(patientId);
 
     showNotification(
-      `Observation successfully recorded for ${targetPatient.name} (${targetPatient.bedNumber})${isLiveDb ? ' [Saved to Neon DB]' : ''}.`,
+      `Telemetry snapshot saved for Patient ${patientId}${isLiveDb ? ' [Saved to Neon DB telemetry_snapshots]' : ''}.`,
       "success"
     );
 

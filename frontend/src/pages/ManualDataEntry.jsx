@@ -100,7 +100,8 @@ export const ManualDataEntry = () => {
   // Section 6 Form: Laboratory & ABG Results
   const [labForm, setLabForm] = useState({
     panel: 'Arterial Blood Gas (ABG)',
-    // ABG
+    // ABG & manual_lab_records columns
+    fio2: '0.21',
     ph: '',
     pao2: '',
     paco2: '',
@@ -188,8 +189,9 @@ export const ManualDataEntry = () => {
           return;
         }
 
+        const patientIdentifier = selectedPatient.patient_id || selectedPatient.id;
         await addClinicalNote({
-          patientId: selectedPatient.id,
+          patientId: patientIdentifier,
           author: commonMeta.staffName,
           type: notesForm.type,
           findings: notesForm.findings,
@@ -226,8 +228,9 @@ export const ManualDataEntry = () => {
           return;
         }
 
+        const patientIdentifier = selectedPatient.patient_id || selectedPatient.id;
         await addMedicationRecord({
-          patientId: selectedPatient.id,
+          patientId: patientIdentifier,
           medicationName: medForm.medicationName,
           prescribedDose: medForm.prescribedDose || medForm.administeredDose,
           administeredDose: medForm.administeredDose || medForm.prescribedDose,
@@ -263,8 +266,9 @@ export const ManualDataEntry = () => {
           return;
         }
 
+        const patientIdentifier = selectedPatient.patient_id || selectedPatient.id;
         await addFluidRecord({
-          patientId: selectedPatient.id,
+          patientId: patientIdentifier,
           interval: fluidForm.interval,
           oralIntake: fluidForm.oralIntake,
           ivIntake: fluidForm.ivIntake,
@@ -298,6 +302,9 @@ export const ManualDataEntry = () => {
       } else if (activeTab === 'labs') {
         // Collect entered lab values
         const values = {};
+        const fio2Val = labForm.fio2 ? Number(labForm.fio2) : 0.21;
+        values.fio2 = { val: fio2Val, unit: '', ref: '0.21 - 1.00', flag: fio2Val > 0.40 ? 'high' : 'normal' };
+
         if (labForm.ph) values.ph = { val: Number(labForm.ph), unit: '', ref: '7.35 - 7.45', flag: (Number(labForm.ph) < 7.35 ? 'low' : Number(labForm.ph) > 7.45 ? 'high' : 'normal') };
         if (labForm.pao2) values.pao2 = { val: Number(labForm.pao2), unit: 'mmHg', ref: '80 - 100', flag: (Number(labForm.pao2) < 80 ? 'low' : 'normal') };
         if (labForm.paco2) values.paco2 = { val: Number(labForm.paco2), unit: 'mmHg', ref: '35 - 45', flag: (Number(labForm.paco2) > 45 ? 'high' : Number(labForm.paco2) < 35 ? 'low' : 'normal') };
@@ -312,15 +319,20 @@ export const ManualDataEntry = () => {
         if (labForm.potassium) values.potassium = { val: Number(labForm.potassium), unit: 'mEq/L', ref: '3.5 - 5.0', flag: (Number(labForm.potassium) > 5.0 ? 'high' : 'normal') };
         if (labForm.glucose) values.glucose = { val: Number(labForm.glucose), unit: 'mg/dL', ref: '70 - 140', flag: (Number(labForm.glucose) > 180 ? 'high' : 'normal') };
 
-        if (Object.keys(values).length === 0) {
-          setErrors({ general: 'Please enter at least one laboratory test result.' });
+        if (!labForm.ph && !labForm.paco2 && !labForm.lactate && !labForm.hb && !labForm.creatinine && !labForm.notes) {
+          setErrors({ general: 'Please enter at least one laboratory test result or note.' });
           setIsSubmitting(false);
           return;
         }
 
+        const patientIdentifier = selectedPatient.patient_id || selectedPatient.id;
         await addLabResult({
-          patientId: selectedPatient.id,
+          patientId: patientIdentifier,
           panel: labForm.panel,
+          fio2: fio2Val,
+          ph: labForm.ph ? Number(labForm.ph) : null,
+          paco2: labForm.paco2 ? Number(labForm.paco2) : null,
+          lactate: labForm.lactate ? Number(labForm.lactate) : null,
           values: values,
           collectionTime: `${commonMeta.date} ${labForm.collectionTime}`,
           resultTime: `${commonMeta.date} ${commonMeta.time}`,
@@ -329,12 +341,13 @@ export const ManualDataEntry = () => {
         });
 
         setSuccessBanner({
-          category: 'Laboratory & ABG Results',
-          details: `${labForm.panel} results (${Object.keys(values).length} parameters) saved for ${selectedPatient.name}.`
+          category: 'Laboratory & ABG Results (manual_lab_records)',
+          details: `Manual lab record saved for ${selectedPatient.name}.`
         });
 
         setLabForm({
           panel: 'Arterial Blood Gas (ABG)',
+          fio2: '0.21',
           ph: '', pao2: '', paco2: '', hco3: '', lactate: '',
           hb: '', wbc: '', platelets: '', creatinine: '', urea: '', sodium: '', potassium: '', glucose: '',
           collectionTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
@@ -347,8 +360,9 @@ export const ManualDataEntry = () => {
           return;
         }
 
+        const patientIdentifier = selectedPatient.patient_id || selectedPatient.id;
         await addManualObservation({
-          patientId: selectedPatient.id,
+          patientId: patientIdentifier,
           hr: vitalsForm.hr,
           bpSys: vitalsForm.bpSys,
           bpDia: vitalsForm.bpDia,
@@ -478,11 +492,14 @@ export const ManualDataEntry = () => {
                 {patients.length === 0 ? (
                   <option value="" disabled>No ICU patients currently registered</option>
                 ) : (
-                  patients.map(p => (
-                    <option key={p.id} value={p.id}>
-                      {p.bedNumber} — {p.name} ({p.id}) | {p.status}
-                    </option>
-                  ))
+                  patients.map(p => {
+                    const pId = p.patient_id || p.id;
+                    return (
+                      <option key={pId} value={pId}>
+                        {p.bedNumber} — {p.name || `Patient ${pId}`} ({pId}) | {p.status}
+                      </option>
+                    );
+                  })
                 )}
               </select>
             </div>
@@ -532,11 +549,11 @@ export const ManualDataEntry = () => {
           {selectedPatient && (
             <div className="confirmed-demographics-strip">
               <span className="demo-chip"><strong>Bed:</strong> <span className="text-blue font-bold">{selectedPatient.bedNumber}</span></span>
-              <span className="demo-chip"><strong>ID:</strong> <span className="font-mono">{selectedPatient.id}</span></span>
-              <span className="demo-chip"><strong>Name:</strong> <strong>{selectedPatient.name}</strong></span>
-              <span className="demo-chip"><strong>Age/Sex:</strong> {selectedPatient.age}y • {selectedPatient.gender}</span>
-              <span className="demo-chip"><strong>Admitted:</strong> {selectedPatient.admissionDate}</span>
-              <span className="demo-chip"><strong>Diagnosis:</strong> {selectedPatient.diagnosis}</span>
+              <span className="demo-chip"><strong>ID:</strong> <span className="font-mono">{selectedPatient.patient_id || selectedPatient.id}</span></span>
+              <span className="demo-chip"><strong>Name:</strong> <strong>{selectedPatient.name || `Patient ${selectedPatient.patient_id || selectedPatient.id}`}</strong></span>
+              {selectedPatient.age && <span className="demo-chip"><strong>Age/Sex:</strong> {selectedPatient.age}y • {selectedPatient.gender}</span>}
+              <span className="demo-chip"><strong>Admitted:</strong> {selectedPatient.admissionDate || 'Active'}</span>
+              <span className="demo-chip"><strong>Status:</strong> {selectedPatient.status}</span>
             </div>
           )}
         </div>
@@ -1006,8 +1023,21 @@ export const ManualDataEntry = () => {
 
                 {/* ABG Parameters */}
                 <div className="fluid-sub-block">
-                  <h4 className="sub-block-title text-rose">ARTERIAL BLOOD GAS (ABG)</h4>
-                  <div className="form-row-3">
+                  <h4 className="sub-block-title text-rose">ARTERIAL BLOOD GAS (ABG) & NURSE LABS</h4>
+                  <div className="form-row-4">
+                    <div className="form-field">
+                      <label className="field-label">FiO₂ (Inspired O₂ Fraction)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.21"
+                        max="1.00"
+                        placeholder="0.21 (Room air) - 1.00"
+                        value={labForm.fio2}
+                        onChange={(e) => setLabForm({ ...labForm, fio2: e.target.value })}
+                        className="input-text"
+                      />
+                    </div>
                     <div className="form-field">
                       <label className="field-label">Arterial pH</label>
                       <input
@@ -1020,22 +1050,23 @@ export const ManualDataEntry = () => {
                       />
                     </div>
                     <div className="form-field">
-                      <label className="field-label">PaO₂ (mmHg)</label>
-                      <input
-                        type="number"
-                        placeholder="85 (Ref 80-100)"
-                        value={labForm.pao2}
-                        onChange={(e) => setLabForm({ ...labForm, pao2: e.target.value })}
-                        className="input-text"
-                      />
-                    </div>
-                    <div className="form-field">
                       <label className="field-label">PaCO₂ (mmHg)</label>
                       <input
                         type="number"
                         placeholder="40 (Ref 35-45)"
                         value={labForm.paco2}
                         onChange={(e) => setLabForm({ ...labForm, paco2: e.target.value })}
+                        className="input-text"
+                      />
+                    </div>
+                    <div className="form-field">
+                      <label className="field-label">Serum Lactate (mmol/L)</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        placeholder="1.2 (Ref < 2.0)"
+                        value={labForm.lactate}
+                        onChange={(e) => setLabForm({ ...labForm, lactate: e.target.value })}
                         className="input-text"
                       />
                     </div>

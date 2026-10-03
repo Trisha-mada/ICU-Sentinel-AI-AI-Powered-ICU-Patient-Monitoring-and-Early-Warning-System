@@ -23,33 +23,30 @@ function checkDbReady(res) {
 
 /**
  * Helper to check if an ICU bed is currently occupied by an active (non-discharged) patient
- * Returns the conflicting occupant details or null if vacant
+ * Returns occupant details or null if vacant
  */
-async function checkBedOccupancy(clientOrPool, bedNumber, excludePatientId = null) {
+async function checkBedOccupancy(clientOrPool, bedId, excludePatientId = null) {
   const query = `
     SELECT 
-      a.id AS "admissionId",
-      a.patient_id AS "patientId",
-      a.bed_number AS "bedNumber",
-      a.status,
-      p.full_name AS "patientName"
-    FROM icu_admissions a
-    JOIN patients p ON p.id = a.patient_id
-    WHERE LOWER(TRIM(a.bed_number)) = LOWER(TRIM($1))
-      AND a.status != 'Discharged'
-      ${excludePatientId ? 'AND a.patient_id != $2' : ''}
-    ORDER BY a.created_at DESC
+      patient_id AS "patientId",
+      bed_id AS "bedNumber",
+      status,
+      admission_time AS "admissionTime"
+    FROM patients
+    WHERE LOWER(TRIM(bed_id)) = LOWER(TRIM($1))
+      AND (discharge_time IS NULL AND status != 'DISCHARGED')
+      ${excludePatientId ? 'AND patient_id != $2' : ''}
+    ORDER BY admission_time DESC
     LIMIT 1;
   `;
-  const params = excludePatientId ? [bedNumber, excludePatientId] : [bedNumber];
+  const params = excludePatientId ? [bedId, excludePatientId] : [bedId];
   const result = await clientOrPool.query(query, params);
   return result.rows.length > 0 ? result.rows[0] : null;
 }
 
 /**
  * GET /api/patients/next-id
- * Predicts the next sequential 3-digit patient ID (e.g. 001, 002, 003...)
- * Uses PostgreSQL sequence state combined with existing patient records
+ * Returns the next sequential 3-digit patient ID (e.g. 001, 002, 003...)
  */
 async function getNextPatientId(req, res, next) {
   if (!checkDbReady(res)) return;
@@ -58,23 +55,14 @@ async function getNextPatientId(req, res, next) {
     const query = `
       SELECT 
         LPAD(
-          GREATEST(
-            COALESCE((
-              SELECT CASE 
-                WHEN NOT is_called THEN last_value
-                ELSE last_value + 1
-              END
-              FROM patient_id_seq
-            ), 1),
-            COALESCE((
-              SELECT MAX(NULLIF(regexp_replace(id, '\\D', '', 'g'), '')::bigint) + 1 
-              FROM patients 
-              WHERE id ~ '^\\d+$'
-            ), 1)
+          COALESCE(
+            MAX(NULLIF(regexp_replace(patient_id, '\\D', '', 'g'), '')::bigint) + 1,
+            1
           )::text, 
           3, 
           '0'
-        ) AS "nextPatientId";
+        ) AS "nextPatientId"
+      FROM patients;
     `;
 
     const result = await pool.query(query);
@@ -91,7 +79,7 @@ async function getNextPatientId(req, res, next) {
 
 /**
  * GET /api/patients/beds/status (and /api/beds/status)
- * Returns all 12 fixed ICU beds (ICU-01 through ICU-12) with occupancy and occupant details
+ * Returns all 12 fixed ICU beds (ICU-01 through ICU-12) with occupancy and latest telemetry
  */
 async function getBedStatuses(req, res, next) {
   if (!checkDbReady(res)) return;
@@ -99,36 +87,39 @@ async function getBedStatuses(req, res, next) {
   try {
     const query = `
       SELECT 
-        a.id AS "admissionId",
-        a.patient_id AS "patientId",
-        a.bed_number AS "bedNumber",
-        a.status,
-        a.diagnosis,
-        a.admission_date AS "admissionDate",
-        a.admission_time AS "admissionTime",
-        a.ventilator_attached AS "ventilatorAttached",
-        p.full_name AS "patientName",
-        p.age,
-        p.gender,
-        p.mrn,
-        v.heart_rate AS "latestHeartRate",
-        v.bp_systolic AS "latestBpSystolic",
-        v.bp_diastolic AS "latestBpDiastolic",
-        v.spo2 AS "latestSpo2",
-        v.respiratory_rate AS "latestRespiratoryRate",
-        v.temperature AS "latestTemperature",
-        v.recorded_at AS "lastObservationTime"
-      FROM icu_admissions a
-      JOIN patients p ON p.id = a.patient_id
+        p.patient_id AS "patientId",
+        p.bed_id AS "bedNumber",
+        p.status,
+        p.admission_time AS "admissionTime",
+        p.discharge_time AS "dischargeTime",
+        t.heart_rate AS "latestHeartRate",
+        t.sbp AS "latestBpSystolic",
+        t.dbp AS "latestBpDiastolic",
+        t.map AS "latestBpMean",
+        t.spo2 AS "latestSpo2",
+        t.resp AS "latestRespiratoryRate",
+        t.recorded_at AS "lastObservationTime",
+        a.risk_probability AS "latestRiskProbability",
+        a.is_early_warning AS "isEarlyWarning",
+        a.shock_index AS "shockIndex",
+        a.delta_1h_map AS "delta1hMap"
+      FROM patients p
       LEFT JOIN LATERAL (
-        SELECT heart_rate, bp_systolic, bp_diastolic, spo2, respiratory_rate, temperature, recorded_at
-        FROM vital_observations
-        WHERE patient_id = a.patient_id
+        SELECT heart_rate, sbp, dbp, map, spo2, resp, recorded_at
+        FROM telemetry_snapshots
+        WHERE patient_id = p.patient_id
         ORDER BY recorded_at DESC
         LIMIT 1
-      ) v ON true
-      WHERE a.status != 'Discharged'
-      ORDER BY a.bed_number ASC;
+      ) t ON true
+      LEFT JOIN LATERAL (
+        SELECT risk_probability, is_early_warning, shock_index, delta_1h_map, triggered_at
+        FROM deterioration_alerts
+        WHERE patient_id = p.patient_id
+        ORDER BY triggered_at DESC
+        LIMIT 1
+      ) a ON true
+      WHERE p.discharge_time IS NULL AND p.status != 'DISCHARGED'
+      ORDER BY p.bed_id ASC;
     `;
 
     const result = await pool.query(query);
@@ -142,26 +133,25 @@ async function getBedStatuses(req, res, next) {
       if (occupant) {
         return {
           bedNumber,
-          status: 'Occupied',
+          status: occupant.status || 'Occupied',
           isOccupied: true,
-          admissionId: occupant.admissionId,
           patientId: occupant.patientId,
-          patientName: occupant.patientName,
-          age: occupant.age,
-          gender: occupant.gender,
-          mrn: occupant.mrn,
-          diagnosis: occupant.diagnosis,
-          admissionStatus: occupant.status,
-          admissionDate: occupant.admissionDate ? new Date(occupant.admissionDate).toISOString().split('T')[0] : 'N/A',
+          patientName: `Patient ${occupant.patientId}`,
+          admissionDate: occupant.admissionTime ? new Date(occupant.admissionTime).toISOString().split('T')[0] : 'N/A',
           admissionTime: occupant.admissionTime ? new Date(occupant.admissionTime).toISOString() : null,
-          ventilatorAttached: !!occupant.ventilatorAttached,
           lastObservationTime: occupant.lastObservationTime,
+          riskProbability: occupant.latestRiskProbability !== null ? Number(occupant.latestRiskProbability) : null,
+          isEarlyWarning: !!occupant.isEarlyWarning,
+          shockIndex: occupant.shockIndex !== null ? Number(occupant.shockIndex) : null,
+          delta1hMap: occupant.delta1hMap !== null ? Number(occupant.delta1hMap) : null,
           latestVitals: {
-            heartRate: occupant.latestHeartRate ? Number(occupant.latestHeartRate) : null,
-            bloodPressure: occupant.latestBpSystolic ? `${occupant.latestBpSystolic}/${occupant.latestBpDiastolic}` : null,
-            spo2: occupant.latestSpo2 ? Number(occupant.latestSpo2) : null,
-            respiratoryRate: occupant.latestRespiratoryRate ? Number(occupant.latestRespiratoryRate) : null,
-            temperature: occupant.latestTemperature ? Number(occupant.latestTemperature) : null
+            heartRate: occupant.latestHeartRate !== null ? Number(occupant.latestHeartRate) : null,
+            bloodPressure: occupant.latestBpSystolic !== null ? `${occupant.latestBpSystolic}/${occupant.latestBpDiastolic}` : null,
+            systolic: occupant.latestBpSystolic !== null ? Number(occupant.latestBpSystolic) : null,
+            diastolic: occupant.latestBpDiastolic !== null ? Number(occupant.latestBpDiastolic) : null,
+            mean: occupant.latestBpMean !== null ? Number(occupant.latestBpMean) : null,
+            spo2: occupant.latestSpo2 !== null ? Number(occupant.latestSpo2) : null,
+            respiratoryRate: occupant.latestRespiratoryRate !== null ? Number(occupant.latestRespiratoryRate) : null
           }
         };
       }
@@ -169,18 +159,15 @@ async function getBedStatuses(req, res, next) {
         bedNumber,
         status: 'Available',
         isOccupied: false,
-        admissionId: null,
         patientId: null,
         patientName: null,
-        age: null,
-        gender: null,
-        mrn: null,
-        diagnosis: null,
-        admissionStatus: null,
         admissionDate: null,
         admissionTime: null,
-        ventilatorAttached: false,
         lastObservationTime: null,
+        riskProbability: null,
+        isEarlyWarning: false,
+        shockIndex: null,
+        delta1hMap: null,
         latestVitals: null
       };
     });
@@ -203,8 +190,8 @@ async function getBedStatuses(req, res, next) {
 
 /**
  * GET /api/patients
- * List active ICU patients with admission details and telemetry.
- * Set ?includeDischarged=true to include past patients.
+ * List active ICU patients with bed assignment and telemetry snapshots.
+ * Set ?includeDischarged=true to include discharged patients.
  */
 async function getAllPatients(req, res, next) {
   if (!checkDbReady(res)) return;
@@ -214,124 +201,121 @@ async function getAllPatients(req, res, next) {
   try {
     const query = `
       SELECT 
-        p.id,
-        p.mrn,
-        p.full_name AS "name",
-        p.age,
-        p.gender,
-        p.created_at AS "createdAt",
-        p.updated_at AS "updatedAt",
-        a.id AS "admissionId",
-        a.bed_number AS "bedNumber",
-        a.diagnosis,
-        a.status,
-        a.admission_date AS "admissionDate",
-        a.admission_time AS "admissionTime",
-        a.discharge_date AS "dischargeDate",
-        a.discharge_notes AS "dischargeNotes",
-        a.ventilator_attached AS "ventilatorAttached",
-        v.recorded_at AS "lastObservationTime",
-        v.heart_rate AS "latestHeartRate",
-        v.bp_systolic AS "latestBpSystolic",
-        v.bp_diastolic AS "latestBpDiastolic",
-        v.spo2 AS "latestSpo2",
-        v.respiratory_rate AS "latestRespiratoryRate",
-        v.temperature AS "latestTemperature",
-        v.data_source AS "latestVitalsSource"
+        p.patient_id,
+        p.patient_id AS "id",
+        p.patient_id AS "patientId",
+        p.bed_id AS "bedNumber",
+        p.bed_id AS "bed_id",
+        p.status,
+        p.admission_time AS "admissionTime",
+        p.discharge_time AS "dischargeTime",
+        t.recorded_at AS "lastObservationTime",
+        t.heart_rate AS "latestHeartRate",
+        t.sbp AS "latestBpSystolic",
+        t.dbp AS "latestBpDiastolic",
+        t.map AS "latestBpMean",
+        t.spo2 AS "latestSpo2",
+        t.resp AS "latestRespiratoryRate",
+        a.risk_probability AS "latestRiskProbability",
+        a.is_early_warning AS "isEarlyWarning",
+        a.shock_index AS "shockIndex",
+        a.delta_1h_map AS "delta1hMap"
       FROM patients p
-      ${includeDischarged ? 'LEFT JOIN' : 'JOIN'} LATERAL (
-        SELECT id, bed_number, diagnosis, status, admission_date, admission_time, discharge_date, discharge_notes, ventilator_attached
-        FROM icu_admissions
-        WHERE patient_id = p.id
-          ${includeDischarged ? '' : "AND status != 'Discharged'"}
-        ORDER BY created_at DESC
-        LIMIT 1
-      ) a ON true
       LEFT JOIN LATERAL (
-        SELECT recorded_at, heart_rate, bp_systolic, bp_diastolic, spo2, respiratory_rate, temperature, data_source
-        FROM vital_observations
-        WHERE patient_id = p.id
+        SELECT recorded_at, heart_rate, sbp, dbp, map, spo2, resp
+        FROM telemetry_snapshots
+        WHERE patient_id = p.patient_id
         ORDER BY recorded_at DESC
         LIMIT 1
-      ) v ON true
-      ${includeDischarged ? '' : "WHERE a.id IS NOT NULL AND a.status != 'Discharged'"}
+      ) t ON true
+      LEFT JOIN LATERAL (
+        SELECT risk_probability, is_early_warning, shock_index, delta_1h_map, triggered_at
+        FROM deterioration_alerts
+        WHERE patient_id = p.patient_id
+        ORDER BY triggered_at DESC
+        LIMIT 1
+      ) a ON true
+      ${includeDischarged ? '' : "WHERE p.discharge_time IS NULL AND p.status != 'DISCHARGED'"}
       ORDER BY 
         CASE 
-          WHEN a.status = 'Critical' THEN 1
-          WHEN a.status = 'Alert' THEN 2
-          WHEN a.status = 'Stable' THEN 3
-          ELSE 4
+          WHEN p.status = 'Critical' THEN 1
+          WHEN p.status = 'Alert' THEN 2
+          WHEN p.status = 'ACTIVE' THEN 3
+          WHEN p.status = 'Stable' THEN 4
+          ELSE 5
         END,
-        COALESCE(a.bed_number, p.id) ASC;
+        p.bed_id ASC;
     `;
 
     const result = await pool.query(query);
     
     const patients = result.rows.map(row => ({
-      id: row.id,
-      mrn: row.mrn,
-      name: row.name,
-      age: row.age,
-      gender: row.gender,
+      id: row.patient_id,
+      patient_id: row.patient_id,
+      patientId: row.patient_id,
+      name: `Patient ${row.patient_id}`,
       bedNumber: row.bedNumber || 'Unassigned',
-      diagnosis: row.diagnosis || 'ICU Admission',
-      status: row.status || 'Observation',
-      admissionDate: row.admissionDate ? new Date(row.admissionDate).toISOString().split('T')[0] : 'N/A',
+      bed_id: row.bed_id || row.bedNumber,
+      status: row.status || 'ACTIVE',
+      admissionDate: row.admissionTime ? new Date(row.admissionTime).toISOString().split('T')[0] : 'N/A',
       admissionTime: row.admissionTime ? new Date(row.admissionTime).toISOString() : null,
-      admissionId: row.admissionId,
-      dischargeDate: row.dischargeDate ? new Date(row.dischargeDate).toISOString() : null,
-      dischargeNotes: row.dischargeNotes || null,
-      ventilatorAttached: !!row.ventilatorAttached,
+      dischargeTime: row.dischargeTime ? new Date(row.dischargeTime).toISOString() : null,
       isDemoData: false,
       dataSource: 'Neon PostgreSQL (Live DB)',
       lastUpdated: row.lastObservationTime ? new Date(row.lastObservationTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : (row.admissionTime ? new Date(row.admissionTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Admitted'),
-      lastUpdatedTimestamp: row.lastObservationTime || row.admissionTime || row.createdAt,
+      lastUpdatedTimestamp: row.lastObservationTime || row.admissionTime,
+      riskAssessment: {
+        probability: row.latestRiskProbability !== null ? Number(row.latestRiskProbability) : null,
+        isEarlyWarning: !!row.isEarlyWarning,
+        shockIndex: row.shockIndex !== null ? Number(row.shockIndex) : null,
+        delta1hMap: row.delta1hMap !== null ? Number(row.delta1hMap) : null
+      },
       vitals: {
         heartRate: {
-          value: row.latestHeartRate ? Number(row.latestHeartRate) : null,
+          value: row.latestHeartRate !== null ? Number(row.latestHeartRate) : null,
           unit: 'bpm',
           timestamp: row.lastObservationTime ? new Date(row.lastObservationTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A',
-          source: row.latestVitalsSource || 'Neon DB',
+          source: 'telemetry_snapshots',
           status: row.latestHeartRate ? (row.latestHeartRate > 120 || row.latestHeartRate < 45 ? 'critical' : row.latestHeartRate > 100 || row.latestHeartRate < 55 ? 'warning' : 'normal') : 'normal',
           statusLabel: row.latestHeartRate ? (row.latestHeartRate > 100 ? 'Tachycardia' : row.latestHeartRate < 55 ? 'Bradycardia' : 'Normal Sinus') : 'No reading',
           isStale: false
         },
         bloodPressure: {
-          systolic: row.latestBpSystolic ? Number(row.latestBpSystolic) : null,
-          diastolic: row.latestBpDiastolic ? Number(row.latestBpDiastolic) : null,
-          mean: (row.latestBpSystolic && row.latestBpDiastolic) ? Math.round((Number(row.latestBpSystolic) + 2 * Number(row.latestBpDiastolic)) / 3) : null,
+          systolic: row.latestBpSystolic !== null ? Number(row.latestBpSystolic) : null,
+          diastolic: row.latestBpDiastolic !== null ? Number(row.latestBpDiastolic) : null,
+          mean: row.latestBpMean !== null ? Number(row.latestBpMean) : ((row.latestBpSystolic && row.latestBpDiastolic) ? Math.round((Number(row.latestBpSystolic) + 2 * Number(row.latestBpDiastolic)) / 3) : null),
           unit: 'mmHg',
           timestamp: row.lastObservationTime ? new Date(row.lastObservationTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A',
-          source: row.latestVitalsSource || 'Neon DB',
+          source: 'telemetry_snapshots',
           status: row.latestBpSystolic ? (row.latestBpSystolic < 90 || row.latestBpSystolic > 180 ? 'critical' : (row.latestBpSystolic > 140 || row.latestBpDiastolic > 90) ? 'warning' : 'normal') : 'normal',
           statusLabel: row.latestBpSystolic ? `${row.latestBpSystolic}/${row.latestBpDiastolic}` : 'No reading',
           isStale: false
         },
         spo2: {
-          value: row.latestSpo2 ? Number(row.latestSpo2) : null,
+          value: row.latestSpo2 !== null ? Number(row.latestSpo2) : null,
           unit: '%',
           timestamp: row.lastObservationTime ? new Date(row.lastObservationTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A',
-          source: row.latestVitalsSource || 'Neon DB',
+          source: 'telemetry_snapshots',
           status: row.latestSpo2 ? (row.latestSpo2 < 90 ? 'critical' : (row.latestSpo2 < 95 ? 'warning' : 'normal')) : 'normal',
           statusLabel: row.latestSpo2 ? `${row.latestSpo2}%` : 'No reading',
           isStale: false
         },
         respiratoryRate: {
-          value: row.latestRespiratoryRate ? Number(row.latestRespiratoryRate) : null,
+          value: row.latestRespiratoryRate !== null ? Number(row.latestRespiratoryRate) : null,
           unit: 'breaths/min',
           timestamp: row.lastObservationTime ? new Date(row.lastObservationTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A',
-          source: row.latestVitalsSource || 'Neon DB',
+          source: 'telemetry_snapshots',
           status: row.latestRespiratoryRate ? (row.latestRespiratoryRate > 30 || row.latestRespiratoryRate < 8 ? 'critical' : (row.latestRespiratoryRate > 22 || row.latestRespiratoryRate < 12) ? 'warning' : 'normal') : 'normal',
           statusLabel: row.latestRespiratoryRate ? `${row.latestRespiratoryRate} bpm` : 'No reading',
           isStale: false
         },
         temperature: {
-          value: row.latestTemperature ? Number(row.latestTemperature) : null,
+          value: null,
           unit: '°C',
-          timestamp: row.lastObservationTime ? new Date(row.lastObservationTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A',
-          source: row.latestVitalsSource || 'Neon DB',
-          status: row.latestTemperature ? (row.latestTemperature >= 38.8 || row.latestTemperature < 35.0 ? 'critical' : row.latestTemperature > 37.8 ? 'warning' : 'normal') : 'normal',
-          statusLabel: row.latestTemperature ? `${row.latestTemperature}°C` : 'No reading',
+          timestamp: 'N/A',
+          source: 'telemetry_snapshots',
+          status: 'normal',
+          statusLabel: 'No reading',
           isStale: false
         }
       }
@@ -349,7 +333,7 @@ async function getAllPatients(req, res, next) {
 
 /**
  * GET /api/patients/history
- * List all discharged ICU admissions and clinical records history
+ * List discharged ICU patients
  */
 async function getPatientHistory(req, res, next) {
   if (!checkDbReady(res)) return;
@@ -357,30 +341,18 @@ async function getPatientHistory(req, res, next) {
   try {
     const query = `
       SELECT 
-        a.id AS "admissionId",
-        a.patient_id AS "patientId",
-        a.bed_number AS "bedNumber",
-        a.diagnosis,
-        a.status,
-        a.admission_date AS "admissionDate",
-        a.admission_time AS "admissionTime",
-        a.discharge_date AS "dischargeDate",
-        a.discharge_notes AS "dischargeNotes",
-        a.ventilator_attached AS "ventilatorAttached",
-        a.created_at AS "createdAt",
-        p.full_name AS "patientName",
-        p.age,
-        p.gender,
-        p.mrn,
-        (SELECT count(*) FROM vital_observations WHERE admission_id = a.id OR (admission_id IS NULL AND patient_id = a.patient_id)) AS "observationsCount",
-        (SELECT count(*) FROM clinical_notes WHERE admission_id = a.id OR (admission_id IS NULL AND patient_id = a.patient_id)) AS "notesCount",
-        (SELECT count(*) FROM medication_records WHERE admission_id = a.id OR (admission_id IS NULL AND patient_id = a.patient_id)) AS "medicationsCount",
-        (SELECT count(*) FROM fluid_records WHERE admission_id = a.id OR (admission_id IS NULL AND patient_id = a.patient_id)) AS "fluidsCount",
-        (SELECT count(*) FROM lab_results WHERE admission_id = a.id OR (admission_id IS NULL AND patient_id = a.patient_id)) AS "labsCount"
-      FROM icu_admissions a
-      JOIN patients p ON p.id = a.patient_id
-      WHERE a.status = 'Discharged'
-      ORDER BY a.discharge_date DESC NULLS LAST, a.created_at DESC;
+        p.patient_id AS "patientId",
+        p.patient_id AS "id",
+        p.bed_id AS "bedNumber",
+        p.status,
+        p.admission_time AS "admissionTime",
+        p.discharge_time AS "dischargeDate",
+        (SELECT count(*) FROM telemetry_snapshots WHERE patient_id = p.patient_id) AS "observationsCount",
+        (SELECT count(*) FROM manual_lab_records WHERE patient_id = p.patient_id) AS "labsCount",
+        (SELECT count(*) FROM deterioration_alerts WHERE patient_id = p.patient_id) AS "alertsCount"
+      FROM patients p
+      WHERE p.discharge_time IS NOT NULL OR p.status = 'DISCHARGED'
+      ORDER BY p.discharge_time DESC NULLS LAST;
     `;
 
     const result = await pool.query(query);
@@ -389,7 +361,8 @@ async function getPatientHistory(req, res, next) {
       count: result.rows.length,
       data: result.rows.map(r => ({
         ...r,
-        admissionDate: r.admissionDate ? new Date(r.admissionDate).toISOString().split('T')[0] : 'N/A',
+        patientName: `Patient ${r.patientId}`,
+        admissionDate: r.admissionTime ? new Date(r.admissionTime).toISOString().split('T')[0] : 'N/A',
         admissionTimeFormatted: r.admissionTime ? new Date(r.admissionTime).toLocaleString() : 'N/A',
         dischargeDateFormatted: r.dischargeDate ? new Date(r.dischargeDate).toLocaleString() : 'N/A'
       }))
@@ -401,7 +374,7 @@ async function getPatientHistory(req, res, next) {
 
 /**
  * GET /api/patients/:id
- * Retrieve a specific patient record by ID
+ * Retrieve a specific patient record by patient_id
  */
 async function getPatientById(req, res, next) {
   if (!checkDbReady(res)) return;
@@ -411,31 +384,30 @@ async function getPatientById(req, res, next) {
   try {
     const query = `
       SELECT 
-        p.id,
-        p.mrn,
-        p.full_name AS "name",
-        p.age,
-        p.gender,
-        p.created_at AS "createdAt",
-        p.updated_at AS "updatedAt",
-        a.id AS "admissionId",
-        a.bed_number AS "bedNumber",
-        a.diagnosis,
-        a.status,
-        a.admission_date AS "admissionDate",
-        a.admission_time AS "admissionTime",
-        a.discharge_date AS "dischargeDate",
-        a.discharge_notes AS "dischargeNotes",
-        a.ventilator_attached AS "ventilatorAttached"
+        p.patient_id,
+        p.patient_id AS "id",
+        p.patient_id AS "patientId",
+        p.bed_id AS "bedNumber",
+        p.bed_id AS "bed_id",
+        p.status,
+        p.admission_time AS "admissionTime",
+        p.discharge_time AS "dischargeTime",
+        t.heart_rate AS "latestHeartRate",
+        t.sbp AS "latestBpSystolic",
+        t.dbp AS "latestBpDiastolic",
+        t.map AS "latestBpMean",
+        t.spo2 AS "latestSpo2",
+        t.resp AS "latestRespiratoryRate",
+        t.recorded_at AS "lastObservationTime"
       FROM patients p
       LEFT JOIN LATERAL (
-        SELECT id, bed_number, diagnosis, status, admission_date, admission_time, discharge_date, discharge_notes, ventilator_attached
-        FROM icu_admissions
-        WHERE patient_id = p.id
-        ORDER BY created_at DESC
+        SELECT recorded_at, heart_rate, sbp, dbp, map, spo2, resp
+        FROM telemetry_snapshots
+        WHERE patient_id = p.patient_id
+        ORDER BY recorded_at DESC
         LIMIT 1
-      ) a ON true
-      WHERE p.id = $1;
+      ) t ON true
+      WHERE p.patient_id = $1;
     `;
 
     const result = await pool.query(query, [id]);
@@ -451,8 +423,10 @@ async function getPatientById(req, res, next) {
       success: true,
       data: {
         ...patient,
-        admissionDate: patient.admissionDate ? new Date(patient.admissionDate).toISOString().split('T')[0] : 'N/A',
+        name: `Patient ${patient.patient_id}`,
+        admissionDate: patient.admissionTime ? new Date(patient.admissionTime).toISOString().split('T')[0] : 'N/A',
         admissionTime: patient.admissionTime ? new Date(patient.admissionTime).toISOString() : null,
+        dischargeTime: patient.dischargeTime ? new Date(patient.dischargeTime).toISOString() : null,
         isDemoData: false,
         dataSource: 'Neon PostgreSQL (Live DB)'
       }
@@ -464,8 +438,7 @@ async function getPatientById(req, res, next) {
 
 /**
  * POST /api/patients
- * Register a new patient and create an ICU admission with strict 12-bed validation,
- * concurrency-safe sequential Patient ID generation, and future-timestamp rejection.
+ * Register a new patient / admit to an ICU bed in the 'patients' table.
  */
 async function createPatient(req, res, next) {
   if (!checkDbReady(res)) return;
@@ -474,48 +447,20 @@ async function createPatient(req, res, next) {
     id,
     patient_id,
     patientId,
-    mrn,
-    full_name,
-    fullName,
-    name,
-    age,
-    gender,
+    bed_id,
     bed_number,
     bedNumber,
-    diagnosis,
-    admission_date,
-    admissionDate,
     admission_time,
     admissionTime,
-    status = 'Stable',
-    ventilator_attached,
-    ventilatorAttached
+    admission_date,
+    admissionDate,
+    status = 'ACTIVE'
   } = req.body;
 
-  const inputId = (id || patient_id || patientId || '').toString().trim();
-  const patientName = (full_name || fullName || name || '').toString().trim();
-  const patientMrn = mrn ? mrn.toString().trim() : null;
-  const patientBed = (bed_number || bedNumber || '').toString().trim();
-  const patientDiag = (diagnosis || '').toString().trim();
-  const isVentilated = ventilator_attached !== undefined ? !!ventilator_attached : !!ventilatorAttached;
+  let inputPatientId = (patient_id || patientId || id || '').toString().trim();
+  const patientBed = (bed_id || bed_number || bedNumber || '').toString().trim();
 
-  // 1. Basic Demographics Validation
-  if (!patientName || patientName.length < 2) {
-    return res.status(400).json({
-      error: true,
-      message: 'Patient full name is required (at least 2 characters).'
-    });
-  }
-
-  const parsedAge = age !== undefined && age !== null && age !== '' ? parseInt(age, 10) : null;
-  if (parsedAge === null || isNaN(parsedAge) || parsedAge < 0 || parsedAge > 130) {
-    return res.status(400).json({
-      error: true,
-      message: 'Age must be a valid integer between 0 and 130.'
-    });
-  }
-
-  // 2. Strict 12-Bed Identifier Validation
+  // 1. Validate ICU Bed
   if (!patientBed) {
     return res.status(400).json({
       error: true,
@@ -530,36 +475,25 @@ async function createPatient(req, res, next) {
     });
   }
 
-  if (!patientDiag) {
-    return res.status(400).json({
-      error: true,
-      message: 'Admitting diagnosis is required for ICU admission.'
-    });
-  }
-
-  // 3. Admission Date & Time Validation
+  // 2. Validate Admission Date / Time
   const admDateInput = (admission_date || admissionDate || '').toString().trim();
   const admTimeInput = (admission_time || admissionTime || '').toString().trim();
 
   let parsedAdmissionTimestamp = null;
-  let storedAdmissionDate = null;
-
   if (admDateInput && admTimeInput) {
     if (/^\d{2}:\d{2}(:\d{2})?$/.test(admTimeInput)) {
       parsedAdmissionTimestamp = new Date(`${admDateInput}T${admTimeInput}`);
     } else {
       parsedAdmissionTimestamp = new Date(admTimeInput);
     }
-    storedAdmissionDate = admDateInput;
+  } else if (admTimeInput) {
+    parsedAdmissionTimestamp = new Date(admTimeInput);
   } else if (admDateInput) {
-    // If only date is provided, default time to current local time or start of that date
     const now = new Date();
     const currentTimeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
     parsedAdmissionTimestamp = new Date(`${admDateInput}T${currentTimeStr}`);
-    storedAdmissionDate = admDateInput;
   } else {
     parsedAdmissionTimestamp = new Date();
-    storedAdmissionDate = parsedAdmissionTimestamp.toISOString().split('T')[0];
   }
 
   if (isNaN(parsedAdmissionTimestamp.getTime())) {
@@ -569,7 +503,7 @@ async function createPatient(req, res, next) {
     });
   }
 
-  // Reject future admission timestamps (allow 2 minutes buffer for client-server clock skew)
+  // Reject future admission timestamps (allow 2 minutes buffer)
   const nowWithBuffer = new Date(Date.now() + 2 * 60 * 1000);
   if (parsedAdmissionTimestamp > nowWithBuffer) {
     return res.status(400).json({
@@ -578,21 +512,21 @@ async function createPatient(req, res, next) {
     });
   }
 
-  const validStatuses = ['Stable', 'Alert', 'Critical', 'Observation', 'Discharged'];
-  const admissionStatus = validStatuses.includes(status) ? status : 'Stable';
-
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // 4. Enforce 12-Bed Total Occupancy Limit
-    const activeAdmissionsCountRes = await client.query(
-      "SELECT count(*) FROM icu_admissions WHERE status != 'Discharged';"
-    );
-    const activeAdmissionsCount = parseInt(activeAdmissionsCountRes.rows[0].count, 10);
+    // Acquire transaction-level advisory lock to serialize patient admission and prevent duplicate IDs / race conditions
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('patient_id_sequence_lock'));");
 
-    if (activeAdmissionsCount >= 12) {
+    // 3. Enforce 12-Bed Total Occupancy Limit
+    const activePatientsCountRes = await client.query(
+      "SELECT count(*) FROM patients WHERE discharge_time IS NULL AND status != 'DISCHARGED';"
+    );
+    const activePatientsCount = parseInt(activePatientsCountRes.rows[0].count, 10);
+
+    if (activePatientsCount >= 12) {
       await client.query('ROLLBACK');
       return res.status(409).json({
         error: true,
@@ -600,192 +534,101 @@ async function createPatient(req, res, next) {
       });
     }
 
-    // 5. Check Bed Occupancy conflict against other active patients
-    const bedConflict = await checkBedOccupancy(client, patientBed, inputId || null);
+    // 4. Check Bed Occupancy conflict against other active patients
+    const bedConflict = await checkBedOccupancy(client, patientBed, inputPatientId || null);
     if (bedConflict) {
       await client.query('ROLLBACK');
       return res.status(409).json({
         error: true,
-        message: `ICU Bed '${patientBed}' is currently occupied by active patient ${bedConflict.patientId} (${bedConflict.patientName}). Please select an available bed.`
+        message: `ICU Bed '${patientBed}' is currently occupied by active patient ${bedConflict.patientId}. Please select an available bed.`
       });
     }
 
-    // 6. Check if patient already exists and has an active admission
-    let finalPatientId = inputId;
-    let isNewRegistration = false;
-
-    if (finalPatientId) {
-      const patientActiveCheck = await client.query(
-        "SELECT id, bed_number FROM icu_admissions WHERE patient_id = $1 AND status != 'Discharged';",
-        [finalPatientId]
+    // 5. Check or generate sequential patient_id
+    if (!inputPatientId) {
+      const seqRes = await client.query(`
+        SELECT LPAD(
+          COALESCE(
+            MAX(NULLIF(regexp_replace(patient_id, '\\D', '', 'g'), '')::bigint) + 1,
+            1
+          )::text,
+          3,
+          '0'
+        ) AS next_id
+        FROM patients;
+      `);
+      inputPatientId = seqRes.rows[0].next_id;
+    } else {
+      // Verify whether inputPatientId already exists in the patients table
+      const existingCheck = await client.query(
+        "SELECT patient_id, bed_id, status, discharge_time FROM patients WHERE patient_id = $1;",
+        [inputPatientId]
       );
-      if (patientActiveCheck.rows.length > 0) {
-        const currentActive = patientActiveCheck.rows[0];
+      if (existingCheck.rows.length > 0) {
+        const existing = existingCheck.rows[0];
         await client.query('ROLLBACK');
-        return res.status(409).json({
-          error: true,
-          message: `Patient '${finalPatientId}' already occupies active bed '${currentActive.bed_number}'. A patient can occupy only one active ICU bed at a time. Discharge or end the current stay first.`
-        });
-      }
-
-      const existCheck = await client.query('SELECT id FROM patients WHERE id = $1', [finalPatientId]);
-      if (existCheck.rows.length === 0) {
-        isNewRegistration = true;
-        const numVal = parseInt(finalPatientId, 10);
-        if (!isNaN(numVal) && numVal > 0) {
-          await client.query("SELECT setval('patient_id_seq', GREATEST(last_value, $1), true) FROM patient_id_seq;", [numVal]);
+        if (!existing.discharge_time && existing.status !== 'DISCHARGED') {
+          return res.status(409).json({
+            error: true,
+            message: `Patient '${inputPatientId}' already occupies active bed '${existing.bed_id}'. A patient can occupy only one active ICU bed at a time.`
+          });
+        } else {
+          return res.status(409).json({
+            error: true,
+            message: `Patient ID '${inputPatientId}' already exists in database records (Discharged). Please use the next sequential ID or auto-generate.`
+          });
         }
       }
-    } else {
-      isNewRegistration = true;
     }
 
-    // If new patient registration and beds full
-    if (isNewRegistration && activeAdmissionsCount >= 12) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        error: true,
-        message: 'All 12 ICU beds are currently occupied.'
-      });
-    }
-
-    // 7. Check MRN Uniqueness across different patients
-    if (patientMrn) {
-      const mrnCheck = await client.query(
-        'SELECT id, full_name FROM patients WHERE mrn = $1 AND id != $2',
-        [patientMrn, finalPatientId || '']
-      );
-      if (mrnCheck.rows.length > 0) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          error: true,
-          message: `Medical Record Number '${patientMrn}' is already assigned to patient ${mrnCheck.rows[0].id} (${mrnCheck.rows[0].full_name}).`
-        });
-      }
-    }
-
-    // 8. Safely consume next patient ID from sequence if registering new without ID
-    if (!finalPatientId) {
-      const seqRes = await client.query("SELECT LPAD(nextval('patient_id_seq')::text, 3, '0') AS next_id;");
-      finalPatientId = seqRes.rows[0].next_id;
-    }
-
-    // 9. Upsert Patient Record
-    let patientData = null;
-    if (!isNewRegistration) {
-      // Update demographics of existing patient
-      const updatePatientQuery = `
-        UPDATE patients
-        SET 
-          full_name = COALESCE($2, full_name),
-          age = COALESCE($3, age),
-          gender = COALESCE($4, gender),
-          mrn = COALESCE($5, mrn),
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-        RETURNING id, mrn, full_name AS "name", age, gender, created_at AS "createdAt", updated_at AS "updatedAt";
-      `;
-      const updateRes = await client.query(updatePatientQuery, [
-        finalPatientId,
-        patientName,
-        parsedAge,
-        gender || 'Unspecified',
-        patientMrn
-      ]);
-      patientData = updateRes.rows[0];
-    } else {
-      // Insert new patient record
-      const insertPatientQuery = `
-        INSERT INTO patients (id, mrn, full_name, age, gender)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING id, mrn, full_name AS "name", age, gender, created_at AS "createdAt";
-      `;
-      const insertRes = await client.query(insertPatientQuery, [
-        finalPatientId,
-        patientMrn || null,
-        patientName,
-        parsedAge,
-        gender || 'Unspecified'
-      ]);
-      patientData = insertRes.rows[0];
-    }
-
-    // 10. Insert the new ICU Admission Record
-    const insertAdmissionQuery = `
-      INSERT INTO icu_admissions (
-        patient_id, 
-        bed_number, 
-        diagnosis, 
-        admission_date, 
-        admission_time, 
-        status, 
-        ventilator_attached
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+    // 6. Insert patient into 'patients' table (4-table schema)
+    const insertQuery = `
+      INSERT INTO patients (
+        patient_id,
+        bed_id,
+        admission_time,
+        discharge_time,
+        status
+      ) VALUES ($1, $2, $3, NULL, $4)
       RETURNING 
-        id, 
-        bed_number AS "bedNumber", 
-        diagnosis, 
-        status, 
-        ventilator_attached AS "ventilatorAttached", 
-        admission_date AS "admissionDate",
-        admission_time AS "admissionTime";
+        patient_id AS "id",
+        patient_id AS "patient_id",
+        patient_id AS "patientId",
+        bed_id AS "bedNumber",
+        bed_id AS "bed_id",
+        admission_time AS "admissionTime",
+        discharge_time AS "dischargeTime",
+        status;
     `;
-    const admissionRes = await client.query(insertAdmissionQuery, [
-      finalPatientId,
+
+    const admissionStatus = (status && ['ACTIVE', 'DISCHARGED', 'TRANSFERRED'].includes(String(status).toUpperCase()))
+      ? String(status).toUpperCase()
+      : 'ACTIVE';
+
+    const insertRes = await client.query(insertQuery, [
+      inputPatientId,
       patientBed,
-      patientDiag,
-      storedAdmissionDate,
       parsedAdmissionTimestamp.toISOString(),
-      admissionStatus,
-      isVentilated
+      admissionStatus
     ]);
-    const admissionData = admissionRes.rows[0];
 
     await client.query('COMMIT');
 
-    const createdPatient = {
-      id: patientData.id,
-      mrn: patientData.mrn,
-      name: patientData.name,
-      age: patientData.age,
-      gender: patientData.gender,
-      createdAt: patientData.createdAt,
-      admissionId: admissionData.id,
-      bedNumber: admissionData.bedNumber,
-      diagnosis: admissionData.diagnosis,
-      status: admissionData.status,
-      ventilatorAttached: !!admissionData.ventilatorAttached,
-      admissionDate: storedAdmissionDate,
-      admissionTime: parsedAdmissionTimestamp.toISOString(),
-      isDemoData: false,
-      dataSource: 'Neon PostgreSQL (Live DB)',
-      lastUpdated: 'Just registered',
-      lastUpdatedTimestamp: parsedAdmissionTimestamp.toISOString(),
-      vitals: {
-        heartRate: { value: null, unit: 'bpm', timestamp: 'N/A', source: 'Neon DB', status: 'normal', statusLabel: 'No reading', isStale: false },
-        bloodPressure: { systolic: null, diastolic: null, mean: null, unit: 'mmHg', timestamp: 'N/A', source: 'Neon DB', status: 'normal', statusLabel: 'No reading', isStale: false },
-        spo2: { value: null, unit: '%', timestamp: 'N/A', source: 'Neon DB', status: 'normal', statusLabel: 'No reading', isStale: false },
-        respiratoryRate: { value: null, unit: 'breaths/min', timestamp: 'N/A', source: 'Neon DB', status: 'normal', statusLabel: 'No reading', isStale: false },
-        temperature: { value: null, unit: '°C', timestamp: 'N/A', source: 'Neon DB', status: 'normal', statusLabel: 'No reading', isStale: false }
-      }
-    };
-
+    const created = insertRes.rows[0];
     res.status(201).json({
       success: true,
-      message: !isNewRegistration
-        ? `Existing patient ${createdPatient.name} (ID: ${createdPatient.id}) admitted to ${createdPatient.bedNumber} successfully.`
-        : `Patient ${createdPatient.name} (ID: ${createdPatient.id}) registered and admitted to ${createdPatient.bedNumber} successfully.`,
-      data: createdPatient
+      message: `Patient ${created.patient_id} admitted to ${created.bedNumber} successfully.`,
+      data: {
+        ...created,
+        name: `Patient ${created.patient_id}`,
+        admissionDate: parsedAdmissionTimestamp.toISOString().split('T')[0],
+        admissionTime: parsedAdmissionTimestamp.toISOString(),
+        isDemoData: false,
+        dataSource: 'Neon PostgreSQL (Live DB)'
+      }
     });
   } catch (err) {
     await client.query('ROLLBACK');
-    if (err.code === '23505') { // Unique constraint violation
-      return res.status(409).json({
-        error: true,
-        message: 'A duplicate patient ID, MRN, or active bed conflict occurred in the database.'
-      });
-    }
     next(err);
   } finally {
     client.release();
@@ -794,35 +637,31 @@ async function createPatient(req, res, next) {
 
 /**
  * POST /api/patients/:id/discharge (and /api/admissions/:id/discharge)
- * Non-destructive discharge of an active ICU patient:
- * Sets admission status = 'Discharged', records discharge timestamp & notes,
- * frees the assigned ICU bed, and preserves all clinical observations, notes, meds, fluids, and labs.
+ * Discharge an active ICU patient by updating 'discharge_time' and 'status' in 'patients' table.
  */
 async function dischargePatient(req, res, next) {
   if (!checkDbReady(res)) return;
 
   const { id } = req.params;
   const {
-    discharge_date,
-    dischargeDate,
     discharge_time,
     dischargeTime,
-    discharge_notes,
-    dischargeNotes,
-    disposition
+    discharge_date,
+    dischargeDate
   } = req.body;
 
   const dDateInput = (discharge_date || dischargeDate || '').toString().trim();
   const dTimeInput = (discharge_time || dischargeTime || '').toString().trim();
 
   let parsedDischargeTimestamp = null;
-
   if (dDateInput && dTimeInput) {
     if (/^\d{2}:\d{2}(:\d{2})?$/.test(dTimeInput)) {
       parsedDischargeTimestamp = new Date(`${dDateInput}T${dTimeInput}`);
     } else {
       parsedDischargeTimestamp = new Date(dTimeInput);
     }
+  } else if (dTimeInput) {
+    parsedDischargeTimestamp = new Date(dTimeInput);
   } else if (dDateInput) {
     const now = new Date();
     const currentTimeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
@@ -847,46 +686,31 @@ async function dischargePatient(req, res, next) {
     });
   }
 
-  const notesText = [
-    (discharge_notes || dischargeNotes || '').trim(),
-    disposition ? `Disposition: ${disposition.trim()}` : null
-  ].filter(Boolean).join(' | ') || 'Discharged from ICU.';
-
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 1. Locate active admission for this patient (or matching admission ID)
-    const findAdmQuery = `
-      SELECT 
-        a.id, 
-        a.patient_id AS "patientId", 
-        a.bed_number AS "bedNumber", 
-        a.admission_date AS "admissionDate", 
-        a.admission_time AS "admissionTime",
-        p.full_name AS "patientName"
-      FROM icu_admissions a
-      JOIN patients p ON p.id = a.patient_id
-      WHERE (a.patient_id = $1 OR a.id::text = $1)
-        AND a.status != 'Discharged'
-      ORDER BY a.created_at DESC
-      LIMIT 1;
-    `;
-    const admRes = await client.query(findAdmQuery, [id]);
+    // Find active patient record
+    const findRes = await client.query(
+      `SELECT patient_id, bed_id, admission_time 
+       FROM patients 
+       WHERE patient_id = $1 AND (discharge_time IS NULL AND status != 'DISCHARGED')
+       LIMIT 1;`,
+      [id]
+    );
 
-    if (admRes.rows.length === 0) {
+    if (findRes.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({
         error: true,
-        message: `No active ICU admission found for patient/admission '${id}'. The patient may already be discharged.`
+        message: `No active ICU patient found with ID '${id}'. The patient may already be discharged.`
       });
     }
 
-    const activeAdm = admRes.rows[0];
+    const activePatient = findRes.rows[0];
 
-    // 2. Validate discharge timestamp is not earlier than admission timestamp
-    const admissionTime = new Date(activeAdm.admissionTime || activeAdm.admissionDate);
-    if (parsedDischargeTimestamp < admissionTime) {
+    // Validate discharge timestamp is not earlier than admission timestamp
+    if (parsedDischargeTimestamp < new Date(activePatient.admission_time)) {
       await client.query('ROLLBACK');
       return res.status(400).json({
         error: true,
@@ -894,35 +718,29 @@ async function dischargePatient(req, res, next) {
       });
     }
 
-    // 3. Update status to 'Discharged', save timestamp and notes (releases unique index on bed)
-    const updateAdmissionQuery = `
-      UPDATE icu_admissions
-      SET 
-        status = 'Discharged',
-        discharge_date = $2,
-        discharge_notes = $3
-      WHERE id = $1
-      RETURNING 
-        id AS "admissionId", 
-        patient_id AS "patientId", 
-        bed_number AS "bedNumber", 
-        status, 
-        admission_date AS "admissionDate", 
-        admission_time AS "admissionTime", 
-        discharge_date AS "dischargeDate", 
-        discharge_notes AS "dischargeNotes";
-    `;
-    const updateRes = await client.query(updateAdmissionQuery, [
-      activeAdm.id,
-      parsedDischargeTimestamp.toISOString(),
-      notesText
-    ]);
+    // Update patient record
+    const updateRes = await client.query(
+      `UPDATE patients 
+       SET 
+         discharge_time = $1,
+         status = 'DISCHARGED'
+       WHERE patient_id = $2
+       RETURNING 
+         patient_id AS "id",
+         patient_id AS "patient_id",
+         patient_id AS "patientId",
+         bed_id AS "bedNumber",
+         status,
+         admission_time AS "admissionTime",
+         discharge_time AS "dischargeTime";`,
+      [parsedDischargeTimestamp.toISOString(), activePatient.patient_id]
+    );
 
     await client.query('COMMIT');
 
     res.status(200).json({
       success: true,
-      message: `Patient ${activeAdm.patientName} (${activeAdm.patientId}) successfully discharged from ${activeAdm.bedNumber}. Bed is now available.`,
+      message: `Patient ${activePatient.patient_id} successfully discharged from ${activePatient.bed_id}. Bed is now available.`,
       data: updateRes.rows[0]
     });
   } catch (err) {
@@ -935,30 +753,23 @@ async function dischargePatient(req, res, next) {
 
 /**
  * GET /api/patients/:id/admissions
- * Retrieve all admission records (active and past) for a patient
+ * Compatibility endpoint returning patient's admission info
  */
 async function getPatientAdmissions(req, res, next) {
   if (!checkDbReady(res)) return;
-
   const { id } = req.params;
 
   try {
     const query = `
       SELECT 
-        id,
         patient_id AS "patientId",
-        bed_number AS "bedNumber",
-        diagnosis,
-        admission_date AS "admissionDate",
+        patient_id AS "id",
+        bed_id AS "bedNumber",
         admission_time AS "admissionTime",
-        discharge_date AS "dischargeDate",
-        discharge_notes AS "dischargeNotes",
-        status,
-        ventilator_attached AS "ventilatorAttached",
-        created_at AS "createdAt"
-      FROM icu_admissions
-      WHERE patient_id = $1
-      ORDER BY created_at DESC;
+        discharge_time AS "dischargeTime",
+        status
+      FROM patients
+      WHERE patient_id = $1;
     `;
 
     const result = await pool.query(query, [id]);
@@ -967,9 +778,7 @@ async function getPatientAdmissions(req, res, next) {
       count: result.rows.length,
       data: result.rows.map(r => ({
         ...r,
-        admissionDate: r.admissionDate ? new Date(r.admissionDate).toISOString().split('T')[0] : 'N/A',
-        admissionTime: r.admissionTime ? new Date(r.admissionTime).toISOString() : null,
-        dischargeDate: r.dischargeDate ? new Date(r.dischargeDate).toISOString() : null
+        admissionDate: r.admissionTime ? new Date(r.admissionTime).toISOString().split('T')[0] : 'N/A'
       }))
     });
   } catch (err) {
@@ -979,195 +788,11 @@ async function getPatientAdmissions(req, res, next) {
 
 /**
  * POST /api/patients/:id/admissions
- * Create a new admission record for an existing patient with validation
+ * Compatibility endpoint mapping to patient admission
  */
 async function createPatientAdmission(req, res, next) {
-  if (!checkDbReady(res)) return;
-
-  const { id } = req.params;
-  const {
-    bed_number,
-    bedNumber,
-    diagnosis,
-    admission_date,
-    admissionDate,
-    admission_time,
-    admissionTime,
-    status = 'Stable',
-    ventilator_attached,
-    ventilatorAttached
-  } = req.body;
-
-  const bed = (bed_number || bedNumber || '').toString().trim();
-  const diag = (diagnosis || '').toString().trim();
-
-  if (!bed) {
-    return res.status(400).json({
-      error: true,
-      message: 'Bed number is required for ICU admission.'
-    });
-  }
-
-  if (!FIXED_ICU_BEDS.includes(bed)) {
-    return res.status(400).json({
-      error: true,
-      message: `Invalid ICU Bed '${bed}'. Bed number must be one of: ${FIXED_ICU_BEDS.join(', ')}.`
-    });
-  }
-
-  if (!diag) {
-    return res.status(400).json({
-      error: true,
-      message: 'Admitting diagnosis is required for ICU admission.'
-    });
-  }
-
-  const admDateInput = (admission_date || admissionDate || '').toString().trim();
-  const admTimeInput = (admission_time || admissionTime || '').toString().trim();
-
-  let parsedAdmissionTimestamp = null;
-  let storedAdmissionDate = null;
-
-  if (admDateInput && admTimeInput) {
-    if (/^\d{2}:\d{2}(:\d{2})?$/.test(admTimeInput)) {
-      parsedAdmissionTimestamp = new Date(`${admDateInput}T${admTimeInput}`);
-    } else {
-      parsedAdmissionTimestamp = new Date(admTimeInput);
-    }
-    storedAdmissionDate = admDateInput;
-  } else if (admDateInput) {
-    const now = new Date();
-    const currentTimeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-    parsedAdmissionTimestamp = new Date(`${admDateInput}T${currentTimeStr}`);
-    storedAdmissionDate = admDateInput;
-  } else {
-    parsedAdmissionTimestamp = new Date();
-    storedAdmissionDate = parsedAdmissionTimestamp.toISOString().split('T')[0];
-  }
-
-  if (isNaN(parsedAdmissionTimestamp.getTime())) {
-    return res.status(400).json({
-      error: true,
-      message: 'Invalid admission date or time format.'
-    });
-  }
-
-  const nowWithBuffer = new Date(Date.now() + 2 * 60 * 1000);
-  if (parsedAdmissionTimestamp > nowWithBuffer) {
-    return res.status(400).json({
-      error: true,
-      message: 'Admission date and time cannot be in the future.'
-    });
-  }
-
-  const isVentilated = ventilator_attached !== undefined ? !!ventilator_attached : !!ventilatorAttached;
-  const validStatuses = ['Stable', 'Alert', 'Critical', 'Observation', 'Discharged'];
-  const admissionStatus = validStatuses.includes(status) ? status : 'Stable';
-
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    // 1. Check patient existence
-    const patientRes = await client.query('SELECT id, full_name FROM patients WHERE id = $1', [id]);
-    if (patientRes.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({
-        error: true,
-        message: `Patient '${id}' not found in database.`
-      });
-    }
-
-    // 2. Check 12 beds active limit
-    const countRes = await client.query("SELECT count(*) FROM icu_admissions WHERE status != 'Discharged';");
-    if (parseInt(countRes.rows[0].count, 10) >= 12) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        error: true,
-        message: 'All 12 ICU beds are currently occupied.'
-      });
-    }
-
-    // 3. Check if patient already has an active admission
-    const patientActiveRes = await client.query(
-      "SELECT id, bed_number FROM icu_admissions WHERE patient_id = $1 AND status != 'Discharged';",
-      [id]
-    );
-    if (patientActiveRes.rows.length > 0) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        error: true,
-        message: `Patient '${id}' already has an active ICU admission in bed '${patientActiveRes.rows[0].bed_number}'.`
-      });
-    }
-
-    // 4. Validate bed occupancy against other active patients
-    const bedConflict = await checkBedOccupancy(client, bed, id);
-    if (bedConflict) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        error: true,
-        message: `ICU Bed '${bed}' is currently occupied by active patient ${bedConflict.patientId} (${bedConflict.patientName}). Please select an available bed.`
-      });
-    }
-
-    const query = `
-      INSERT INTO icu_admissions (
-        patient_id, 
-        bed_number, 
-        diagnosis, 
-        admission_date, 
-        admission_time, 
-        status, 
-        ventilator_attached
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING 
-        id,
-        patient_id AS "patientId",
-        bed_number AS "bedNumber",
-        diagnosis,
-        admission_date AS "admissionDate",
-        admission_time AS "admissionTime",
-        status,
-        ventilator_attached AS "ventilatorAttached",
-        created_at AS "createdAt";
-    `;
-
-    const result = await client.query(query, [
-      id,
-      bed,
-      diag,
-      storedAdmissionDate,
-      parsedAdmissionTimestamp.toISOString(),
-      admissionStatus,
-      isVentilated
-    ]);
-
-    await client.query('COMMIT');
-
-    res.status(201).json({
-      success: true,
-      message: `Admission record created successfully for bed ${bed}.`,
-      data: {
-        ...result.rows[0],
-        admissionDate: storedAdmissionDate,
-        admissionTime: parsedAdmissionTimestamp.toISOString()
-      }
-    });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    if (err.code === '23505') {
-      return res.status(409).json({
-        error: true,
-        message: `ICU Bed '${bed}' is already occupied.`
-      });
-    }
-    next(err);
-  } finally {
-    client.release();
-  }
+  req.body.patient_id = req.params.id;
+  return createPatient(req, res, next);
 }
 
 module.exports = {

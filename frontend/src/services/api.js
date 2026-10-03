@@ -3,7 +3,7 @@
  * Connects the React application with the Node.js Express backend and Neon PostgreSQL
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || (typeof window !== 'undefined' ? '/api' : 'http://localhost:5000/api');
 
 /**
  * Generic fetch wrapper with error handling and JSON parsing
@@ -93,10 +93,10 @@ export const apiService = {
 
   // 12-Bed Occupancy Status
   async getBedStatuses() {
-    return request('/patients/beds/status');
+    return request('/beds/status');
   },
 
-  // Vital Signs & Telemetry Observations
+  // Telemetry Snapshots (telemetry_snapshots)
   async getPatientVitals(patientId, limit = 50) {
     return request(`/patients/${encodeURIComponent(patientId)}/vitals?limit=${limit}`);
   },
@@ -108,7 +108,35 @@ export const apiService = {
     });
   },
 
-  // Clinical & Nursing Notes
+  // Manual Lab Records (manual_lab_records)
+  async getLabResults(patientId) {
+    return request(`/patients/${encodeURIComponent(patientId)}/labs`);
+  },
+
+  async createLabResult(patientId, labData) {
+    return request(`/patients/${encodeURIComponent(patientId)}/labs`, {
+      method: 'POST',
+      body: JSON.stringify(labData)
+    });
+  },
+
+  // Deterioration Alerts (deterioration_alerts)
+  async getAllAlerts() {
+    return request('/alerts');
+  },
+
+  async getPatientAlerts(patientId) {
+    return request(`/patients/${encodeURIComponent(patientId)}/alerts`);
+  },
+
+  async acknowledgeAlert(alertId, ackData = {}) {
+    return request(`/alerts/${encodeURIComponent(alertId)}/acknowledge`, {
+      method: 'POST',
+      body: JSON.stringify(ackData)
+    });
+  },
+
+  // Clinical Notes (Session / Fallback)
   async getClinicalNotes(patientId) {
     return request(`/patients/${encodeURIComponent(patientId)}/notes`);
   },
@@ -120,7 +148,7 @@ export const apiService = {
     });
   },
 
-  // Medication Administration Records (MAR)
+  // Medication Administration Records (Session / Fallback)
   async getMedicationRecords(patientId) {
     return request(`/patients/${encodeURIComponent(patientId)}/medications`);
   },
@@ -132,7 +160,7 @@ export const apiService = {
     });
   },
 
-  // Fluid Intake & Output
+  // Fluid Intake & Output (Session / Fallback)
   async getFluidRecords(patientId) {
     return request(`/patients/${encodeURIComponent(patientId)}/fluids`);
   },
@@ -141,18 +169,6 @@ export const apiService = {
     return request(`/patients/${encodeURIComponent(patientId)}/fluids`, {
       method: 'POST',
       body: JSON.stringify(fluidData)
-    });
-  },
-
-  // Laboratory & Blood Gas Results
-  async getLabResults(patientId) {
-    return request(`/patients/${encodeURIComponent(patientId)}/labs`);
-  },
-
-  async createLabResult(patientId, labData) {
-    return request(`/patients/${encodeURIComponent(patientId)}/labs`, {
-      method: 'POST',
-      body: JSON.stringify(labData)
     });
   }
 };
